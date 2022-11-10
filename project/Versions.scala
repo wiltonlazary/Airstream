@@ -4,11 +4,13 @@ object Versions {
 
   val Scala_2_13 = "2.13.6"
 
-  val Scala_3 = "3.0.2"
+  val Scala_3 = "3.2.0"
 
-  val ScalaJsDom = "2.0.0"
+  val ScalaJsDom = "2.3.0"
 
-  val Tuplez = "0.3.6"
+  val Tuplez = "0.3.7"
+
+  // Only used in test:
 
   val ScalaTest = "3.2.10"
 

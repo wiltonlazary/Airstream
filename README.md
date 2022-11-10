@@ -1,10 +1,10 @@
 # Airstream
 
 [![Build Status](https://circleci.com/gh/raquo/Airstream.svg?style=svg)](https://circleci.com/gh/raquo/Airstream)
-[![Join the chat at https://gitter.im/Laminar_/Lobby](https://badges.gitter.im/Laminar_/Lobby.svg)](https://gitter.im/Laminar_/Lobby)
+[![Chat on https://discord.gg/JTrUxhq7sj](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://discord.gg/JTrUxhq7sj)
 ![Maven Central](https://img.shields.io/maven-central/v/com.raquo/airstream_sjs1_2.13.svg)
 
-Airstream is a small state propagation and streaming library. Primary differences from other solutions:
+Airstream is a small state propagation and streaming library for Scala.js. Primary differences from other solutions:
 
 - **Mandatory [ownership](#ownership) of leaky resources** – it is impossible to create a subscription without specifying when it shall be destroyed. This helps prevent memory leaks and unexpected behaviour.
 
@@ -21,7 +21,7 @@ Airstream has a very generic design, but is primarily intended to serve as a rea
 I created Airstream because I found existing solutions were not suitable for building reactive UI components. My original need for Airstream was to replace the previous reactive layer of [Laminar](https://laminar.dev), but I'll be happy to see it used by other reactive UI libraries as well. Another piece of Laminar you can reuse is [Scala DOM Types](https://github.com/raquo/scala-dom-types).
 
 ```
-"com.raquo" %%% "airstream" % "0.14.2"  // Requires Scala.js >= 1.7.1
+"com.raquo" %%% "airstream" % "0.14.5"  // Requires Scala.js >= 1.9.0
 ```
 
 
@@ -80,7 +80,7 @@ I created Airstream because I found existing solutions were not suitable for bui
 
 ## Community
 
-* [Gitter](https://gitter.im/Laminar_/Lobby) for chat and random questions (Airstream shares this room with [Laminar](https://laminar.dev))
+* [Discord](https://discord.gg/JTrUxhq7sj) for chat and random questions (Airstream shares this server with [Laminar](https://laminar.dev))
 * [Github issues](https://github.com/raquo/Airstream/issues) for bugs, feature requests, and more in-depth discussions
 
 
@@ -715,7 +715,7 @@ Warning: dom.XmlHttpRequest is an ugly, imperative JS construct. We set event ca
 
 Airstream has no official websockets integration yet.
 
-For several users' implementations, search Laminar gitter room, and the issues in this repo.
+For several users' implementations, search the [Laminar gitter room](https://gitter.im/Laminar_/Lobby), and the issues in this repo.
 
 
 #### DOM Events
@@ -1062,7 +1062,7 @@ Note: These operators are available on qualifying streams and signals by means o
 
 This operator is particularly hard to put into words, at least on my first try. You might want to read the `split signal into signals` test in `SplitEventStreamSpec.scala`
 
-And hey, don't be a stranger, remember we have [Gitter](https://gitter.im/Laminar_/Lobby) for chat.
+And hey, don't be a stranger, remember we have [Discord](https://discord.gg/JTrUxhq7sj) for chat.
 
 ##### Example 1: Latest Version of Foo by Id
 
