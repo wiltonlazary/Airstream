@@ -1,102 +1,279 @@
 package com.raquo.airstream.core
 
 import com.raquo.airstream.combine.generated._
-import com.raquo.airstream.combine.{CombineEventStreamN, MergeEventStream}
-import com.raquo.airstream.core.Source.EventSource
+import com.raquo.airstream.combine.{CombineStreamN, MergeStream}
+import com.raquo.airstream.core.Source.{EventSource, SignalSource}
 import com.raquo.airstream.custom.CustomSource._
 import com.raquo.airstream.custom.{CustomSource, CustomStreamSource}
-import com.raquo.airstream.debug.{DebuggableEventStream, Debugger, DebuggerEventStream}
+import com.raquo.airstream.debug.{DebuggableStream, Debugger, DebuggerStream}
+import com.raquo.airstream.distinct.DistinctStream
 import com.raquo.airstream.eventbus.EventBus
+import com.raquo.airstream.misc._
 import com.raquo.airstream.misc.generated._
-import com.raquo.airstream.misc.{FilterEventStream, FoldLeftSignal, MapEventStream}
-import com.raquo.airstream.split._
-import com.raquo.airstream.timing.{FutureEventStream, _}
+import com.raquo.airstream.split.{SplittableOneStream, SplittableOptionStream, SplittableStream}
+import com.raquo.airstream.timing._
+import com.raquo.ew.JsArray
 
 import scala.annotation.unused
-import scala.concurrent.Future
+import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
+import scala.scalajs.js.JSConverters._
 import scala.util.{Failure, Success, Try}
 
 trait EventStream[+A] extends Observable[A] with BaseObservable[EventStream, A] with EventSource[A] {
 
   override def map[B](project: A => B): EventStream[B] = {
-    new MapEventStream(this, project, recover = None)
+    new MapStream(this, project, recover = None)
   }
 
   /** @param passes Note: guarded against exceptions */
   def filter(passes: A => Boolean): EventStream[A] = {
-    new FilterEventStream(parent = this, passes)
+    new FilterStream(parent = this, passes)
   }
 
   def filterNot(predicate: A => Boolean): EventStream[A] = filter(!predicate(_))
 
-  /** @param pf Note: guarded against exceptions */
-  def collect[B](pf: PartialFunction[A, B]): EventStream[B] = {
-    // @TODO[Performance] Use applyOrElse
-    filter(pf.isDefinedAt).map(pf)
+  /** Filter stream events by a signal or var of boolean.
+    *
+    * `stream.filterWith(otherSignal, passes = _ == false)` is essentially like
+    * `stream.filter(_ => otherSignal.now() == false)` (but it compiles)
+    */
+  def filterWith[B](source: SignalSource[B], passes: B => Boolean): EventStream[A] = {
+    this
+      .withCurrentValueOf(source)
+      .collect { case (ev, sourceValue) if passes(sourceValue) => ev }
+  }
+
+  /** Filter stream events by a signal or var of boolean (passes when true). */
+  def filterWith(source: SignalSource[Boolean]): EventStream[A] = {
+    filterWith[Boolean](source, passes = _ == true)
+  }
+
+  /** Apply `pf` to each event and emit the resulting value,
+    * or emit nothing if `pf` is not defined for that event.
+    *
+    * @param pf Note: guarded against exceptions
+    */
+  def collect[B](pf: PartialFunction[A, B]): EventStream[B] = collectOpt(pf.lift)
+
+  /** Emit `x` if parent stream emits `Some(x)`, do nothing otherwise */
+  def collectSome[B](implicit ev: A <:< Option[B]): EventStream[B] = collectOpt(ev(_))
+
+  /** Apply `fn` to parent stream event, and emit resulting x if it returns Some(x)
+    *
+    * @param fn Note: guarded against exceptions
+    */
+  def collectOpt[B](fn: A => Option[B]): EventStream[B] = {
+    new CollectStream(parent = this, fn)
   }
 
   /** @param ms milliseconds of delay */
   def delay(ms: Int = 0): EventStream[A] = {
-    new DelayEventStream(parent = this, ms)
+    new DelayStream(parent = this, ms)
   }
 
   /** Make a stream that emits this stream's values but waits for `after` stream to emit first in a given transaction.
     * You can use this for Signals too with `Signal.composeChanges` (see docs for more details)
     */
   def delaySync(after: EventStream[_]): EventStream[A] = {
-    new SyncDelayEventStream[A](parent = this, after = after)
+    new SyncDelayStream[A](parent = this, after = after)
   }
 
-  /** See docs for [[ThrottleEventStream]] */
+  /** See docs for [[ThrottleStream]] */
   def throttle(ms: Int, leading: Boolean = true): EventStream[A] = {
-    new ThrottleEventStream(parent = this, intervalMs = ms, leading = leading)
+    new ThrottleStream(parent = this, intervalMs = ms, leading = leading)
   }
 
-  /** See docs for [[DebounceEventStream]] */
+  /** See docs for [[DebounceStream]] */
   def debounce(ms: Int): EventStream[A] = {
-    new DebounceEventStream(parent = this, ms)
+    new DebounceStream(parent = this, ms)
   }
 
-  // @TODO[API] Should we introduce some kind of FoldError() wrapper?
-  /** @param fn Note: guarded against exceptions */
-  def foldLeft[B](initial: B)(fn: (B, A) => B): Signal[B] = {
-    foldLeftRecover(
-      Success(initial)
-    )(
-      (currentValue, nextParentValue) => Try(fn(currentValue.get, nextParentValue.get))
+  /** Drop (skip) the first `numEvents` events from this stream. Note: errors are NOT dropped.
+    *
+    * @param resetOnStop  Reset the count if the stream stops
+    */
+  def drop(numEvents: Int, resetOnStop: Boolean = false): EventStream[A] = {
+    var numDropped = 0
+    new DropStream[A](
+      parent = this,
+      dropWhile = _ => {
+        val shouldDrop = numDropped < numEvents
+        if (shouldDrop) {
+          numDropped += 1
+        }
+        shouldDrop
+      },
+      reset = () => {
+        numDropped = 0
+      },
+      resetOnStop
     )
   }
 
-  /** @param fn Note: Must not throw! */
-  def foldLeftRecover[B](initial: Try[B])(fn: (Try[B], Try[A]) => Try[B]): Signal[B] = {
-    new FoldLeftSignal(parent = this, () => initial, fn)
+  /** Drop (skip) events from this stream as long as they pass the test (as soon as they stop passing, stop dropping)
+    * Note: errors are NOT dropped.
+    *
+    * @param passes       Note: MUST NOT THROW!
+    * @param resetOnStop  Forget everything and start dropping again if the stream stops
+    */
+  def dropWhile(passes: A => Boolean, resetOnStop: Boolean = false): EventStream[A] = {
+    new DropStream[A](
+      parent = this,
+      dropWhile = ev => passes(ev),
+      reset = () => (),
+      resetOnStop
+    )
   }
 
-  @inline def startWith[B >: A](initial: => B): Signal[B] = toSignal(initial)
+  /** Drop (skip) events from this stream as long as they do NOT pass the test (as soon as they start passing, stop dropping)
+    * Note: errors are NOT dropped.
+    *
+    * @param passes       Note: MUST NOT THROW!
+    * @param resetOnStop  Forget everything and start dropping again if the stream stops
+    */
+  def dropUntil(passes: A => Boolean, resetOnStop: Boolean = false): EventStream[A] = {
+    new DropStream[A](
+      parent = this,
+      dropWhile = ev => !passes(ev),
+      () => (),
+      resetOnStop
+    )
+  }
 
-  @inline def startWithTry[B >: A](initial: => Try[B]): Signal[B] = toSignalWithTry(initial)
+  /** Take the first `numEvents` events from this stream, ignore the rest.
+    * Note: As long as events are being taken, ALL errors are also taken
+    *
+    * @param resetOnStop  Reset the count if the stream stops
+    */
+  def take(numEvents: Int, resetOnStop: Boolean = false): EventStream[A] = {
+    var numTaken = 0
+    new TakeStream[A](
+      parent = this,
+      takeWhile = _ => {
+        val shouldTake = numTaken < numEvents
+        if (shouldTake) {
+          numTaken += 1
+        }
+        shouldTake
+      },
+      reset = () => {
+        numTaken = 0
+      },
+      resetOnStop
+    )
+  }
+
+  /** Imitate parent stream as long as events pass the test; stop emitting after that.
+    *
+    * @param passes       Note: MUST NOT THROW!
+    * @param resetOnStop  Forget everything and start dropping again if the stream stops
+    */
+  def takeWhile(passes: A => Boolean, resetOnStop: Boolean = false): EventStream[A] = {
+    new TakeStream[A](
+      parent = this,
+      takeWhile = ev => passes(ev),
+      reset = () => (),
+      resetOnStop
+    )
+  }
+
+  /** Imitate parent stream as long as events to NOT pass the test; stop emitting after that.
+    *
+    * @param passes       Note: MUST NOT THROW!
+    * @param resetOnStop  Forget everything and start dropping again if the stream stops
+    */
+  def takeUntil(passes: A => Boolean, resetOnStop: Boolean = false): EventStream[A] = {
+    new TakeStream[A](
+      parent = this,
+      takeWhile = ev => !passes(ev),
+      () => (),
+      resetOnStop
+    )
+  }
+
+  /** Returns a stream that emits events from this stream AND all off the `streams`, interleaved.
+    * Note: For other types of combination, see `combineWith`, `withCurrentValueOf`, `sample` etc.
+    */
+  def mergeWith[B >: A](streams: EventStream[B]*): EventStream[B] = {
+    EventStream.merge(streams: _*)
+  }
+
+  @deprecated("foldLeft was renamed to scanLeft", "15.0.0-M1")
+  def foldLeft[B](initial: B)(fn: (B, A) => B): Signal[B] = scanLeft(initial)(fn)
+
+  @deprecated("foldLeftRecover was renamed to scanLeftRecover", "15.0.0-M1")
+  def foldLeftRecover[B](initial: Try[B])(fn: (Try[B], Try[A]) => Try[B]): Signal[B] = scanLeftRecover(initial)(fn)
+
+  // @TODO[API] Should we introduce some kind of FoldError() wrapper?
+  /** A signal that emits the accumulated value every time that the parent stream emits.
+    *
+    * See also: [[startWith]]
+    *
+    * @param fn Note: guarded against exceptions
+    */
+  def scanLeft[B](initial: B)(fn: (B, A) => B): Signal[B] = {
+    scanLeftRecover(Success(initial)) { (currentValue, nextParentValue) =>
+      Try(fn(currentValue.get, nextParentValue.get))
+    }
+  }
+
+  /** A signal that emits the accumulated value every time that the parent stream emits.
+    *
+    * @param fn Note: Must not throw!
+    */
+  def scanLeftRecover[B](initial: Try[B])(fn: (Try[B], Try[A]) => Try[B]): Signal[B] = {
+    new ScanLeftSignal(parent = this, () => initial, fn)
+  }
+
+  /** Convert stream to signal, given an initial value
+    *
+    * @param cacheInitialValue if false, signal's initial value will be re-evaluated on every
+    *                          restart (so long as the parent stream does not emit any values)
+    */
+  @inline def startWith[B >: A](initial: => B, cacheInitialValue: Boolean = false): Signal[B] = {
+    toSignal(initial, cacheInitialValue)
+  }
+
+  /** @param cacheInitialValue if false, signal's initial value will be re-evaluated on every
+    *                          restart (so long as the parent stream does not emit any values)
+    */
+  @inline def startWithTry[B >: A](initial: => Try[B], cacheInitialValue: Boolean = false): Signal[B] = {
+    toSignalWithTry(initial, cacheInitialValue)
+  }
 
   @inline def startWithNone: Signal[Option[A]] = toWeakSignal
 
-  def toSignal[B >: A](initial: => B): Signal[B] = {
-    toSignalWithTry(Success(initial))
+  /** @param cacheInitialValue if false, signal's initial value will be re-evaluated on every
+    *                          restart (so long as the parent stream does not emit any values)
+    */
+  def toSignal[B >: A](initial: => B, cacheInitialValue: Boolean = false): Signal[B] = {
+    toSignalWithTry(Success(initial), cacheInitialValue)
   }
 
-  def toSignalWithTry[B >: A](initial: => Try[B]): Signal[B] = {
-    new SignalFromEventStream(this, initial)
+  /** @param cacheInitialValue if false, signal's initial value will be re-evaluated on every
+    *                          restart (so long as the parent stream does not emit any values)
+    */
+  def toSignalWithTry[B >: A](initial: => Try[B], cacheInitialValue: Boolean = false): Signal[B] = {
+    new SignalFromStream(this, initial, cacheInitialValue)
   }
 
+  /** Just a convenience helper. stream.compose(f) is equivalent to f(stream) */
   def compose[B](operator: EventStream[A] => EventStream[B]): EventStream[B] = {
     operator(this)
   }
 
-  /** See docs for [[MapEventStream]]
+  /** Distinct all values (both events and errors) using a comparison function */
+  override def distinctTry(isSame: (Try[A], Try[A]) => Boolean): EventStream[A] = {
+    new DistinctStream[A](parent = this, isSame, resetOnStop = false)
+  }
+
+  /** See docs for [[MapStream]]
     *
     * @param pf Note: guarded against exceptions
     */
   override def recover[B >: A](pf: PartialFunction[Throwable, Option[B]]): EventStream[B] = {
-    new MapEventStream[A, B](
+    new MapStream[A, B](
       parent = this,
       project = identity,
       recover = Some(pf)
@@ -105,10 +282,13 @@ trait EventStream[+A] extends Observable[A] with BaseObservable[EventStream, A] 
 
   override def recoverToTry: EventStream[Try[A]] = map(Try(_)).recover[Try[A]] { case err => Some(Failure(err)) }
 
-  /** See also [[debug]] convenience method in [[BaseObservable]] */
+  /** See also various debug methods in [[com.raquo.airstream.debug.DebuggableObservable]] */
   override def debugWith(debugger: Debugger[A]): EventStream[A] = {
-    new DebuggerEventStream[A](this, debugger)
+    new DebuggerStream[A](this, debugger)
   }
+
+  /** This is used in Signal-s. It's a no-op for Streams. */
+  override protected def onAddedExternalObserver(observer: Observer[A]): Unit = ()
 
   override def toObservable: EventStream[A] = this
 
@@ -123,6 +303,10 @@ object EventStream {
       start = (_, _, _, _) => (),
       stop = _ => ()
     )
+  }
+
+  def unit(emitOnce: Boolean = false): EventStream[Unit] = {
+    EventStream.fromValue((), emitOnce)
   }
 
   /** @param emitOnce if true, the event will be emitted at most one time.
@@ -155,15 +339,28 @@ object EventStream {
     )
   }
 
-  def fromFuture[A](future: Future[A], emitFutureIfCompleted: Boolean = false): EventStream[A] = {
-    new FutureEventStream[A](future, emitFutureIfCompleted)
+  def fromFuture[A](future: Future[A], emitOnce: Boolean = false)(implicit ec: ExecutionContext): EventStream[A] = {
+    fromJsPromise(future.toJSPromise(ec), emitOnce)
   }
 
-  def fromJsPromise[A](promise: js.Promise[A]): EventStream[A] = {
-    fromFuture(promise.toFuture)
+  def fromJsPromise[A](promise: js.Promise[A], emitOnce: Boolean = false): EventStream[A] = {
+    new JsPromiseStream[A](promise, emitOnce)
   }
 
   /** Easy helper for custom events. See [[CustomStreamSource]] for docs.
+    *
+    * Provide `start` and `stop` callbacks that will be called when the stream
+    * is started and stopped. E.g. create some resource on start, clean it on stop.
+    *
+    * The arguments to `start` are functions. Call them to do things like emit an
+    * event, emit an error, or get some info:
+    *
+    * `getStartIndex` returns `1` the first time the signal is started, and is
+    * incremented every time it is started again after being stopped.
+    *
+    * `getIsStarted` is a function that you can call any time, including
+    * after some delay, to check if the signal is still started, e.g. if
+    * you don't want to update the signal's value if the signal is stopped.
     *
     * @param stop MUST NOT THROW!
     */
@@ -172,20 +369,27 @@ object EventStream {
     start: (FireValue[A], FireError, GetStartIndex, GetIsStarted) => Unit,
     stop: StartIndex => Unit
   ): EventStream[A] = {
-    CustomStreamSource[A] { (fireValue, fireError, getStartIndex, getIsStarted) =>
+    new CustomStreamSource[A](
+      (fireValue, fireError, getStartIndex, getIsStarted) =>
       CustomSource.Config(
         onStart = () => start(fireValue, fireError, getStartIndex, getIsStarted),
         onStop = () => stop(getStartIndex())
       ).when {
         () => shouldStart(getStartIndex())
       }
-    }
+    )
   }
 
   /** Create a stream and a callback that, when fired, makes that stream emit. */
   def withCallback[A]: (EventStream[A], A => Unit) = {
     val bus = new EventBus[A]
     (bus.events, bus.writer.onNext)
+  }
+
+  /** Create a stream of Unit, and a callback that, when fired, makes that stream emit. */
+  def withUnitCallback: (EventStream[Unit], () => Unit) = {
+    val bus = new EventBus[Unit]
+    (bus.events, () => bus.writer.onNext(()))
   }
 
   /** Create a stream and a JS callback that, when fired, makes that stream emit. */
@@ -200,63 +404,73 @@ object EventStream {
     (bus.events, bus.writer)
   }
 
+  /** Emit () with a delay (`ms` milliseconds after stream is started) */
+  @inline def delay(ms: Int): EventStream[Unit] = delay(ms, ())
+
+  /** Emit `event` with a delay (`ms` milliseconds after stream is started) */
+  def delay[A](ms: Int, event: A, emitOnce: Boolean = false): EventStream[A] = {
+    EventStream.fromValue(event, emitOnce).delay(ms)
+  }
+
   def periodic(
     intervalMs: Int,
-    emitInitial: Boolean = true,
-    resetOnStop: Boolean = true
-  ): PeriodicEventStream[Int] = {
-    new PeriodicEventStream[Int](
+    resetOnStop: Boolean = false
+  ): PeriodicStream[Int] = {
+    new PeriodicStream[Int](
       initial = 0,
       next = eventNumber => Some((eventNumber + 1, intervalMs)),
-      emitInitial = emitInitial,
       resetOnStop = resetOnStop
     )
   }
 
   def sequence[A](streams: Seq[EventStream[A]]): EventStream[Seq[A]] = {
-    new CombineEventStreamN[A, Seq[A]](streams, identity)
+    new CombineStreamN[A, Seq[A]](JsArray(streams: _*), _.asScalaJs.toSeq)
   }
 
   @inline def combineSeq[A](streams: Seq[EventStream[A]]): EventStream[Seq[A]] = sequence(streams)
 
+  /** Returns a stream that emits events from all off the `streams`, interleaved. */
   def merge[A](streams: EventStream[A]*): EventStream[A] = {
-    new MergeEventStream[A](streams)
+    new MergeStream[A](JsArray(streams: _*))
   }
 
-  @inline def mergeSeq[A](streams: Seq[EventStream[A]]): EventStream[A] = {
-    merge(streams: _*) // @TODO[Performance] Does _* introduce any overhead in Scala.js?
+  def mergeSeq[A](streams: Seq[EventStream[A]]): EventStream[A] = {
+    new MergeStream[A](JsArray(streams: _*))
   }
 
   /** Provides methods on EventStream companion object: combine, combineWith */
-  implicit def toEventStreamCompanionCombineSyntax(@unused s: EventStream.type): StaticEventStreamCombineOps.type = StaticEventStreamCombineOps
+  implicit def toEventStreamCompanionCombineSyntax(@unused s: EventStream.type): StaticStreamCombineOps.type = StaticStreamCombineOps
 
   /** Provides methods on EventStream: combine, combineWith, withCurrentValueOf, sample */
-  implicit def toCombinableStream[A](stream: EventStream[A]): CombinableEventStream[A] = new CombinableEventStream(stream)
+  implicit def toCombinableStream[A](stream: EventStream[A]): CombinableStream[A] = new CombinableStream(stream)
 
-  /** Provides methods on EventStream: split, splitOneIntoSignals */
-  implicit def toSplittableStream[M[_], Input](stream: EventStream[M[Input]]): SplittableEventStream[M, Input] = new SplittableEventStream(stream)
+  /** Provides methods on EventStream: split, splitByIndex */
+  implicit def toSplittableStream[M[_], Input](stream: EventStream[M[Input]]): SplittableStream[M, Input] = new SplittableStream(stream)
 
-  /** Provides methods on EventStream: splitOne, splitOneIntoSignals */
-  implicit def toSplittableOneStream[A](stream: EventStream[A]): SplittableOneEventStream[A] = new SplittableOneEventStream(stream)
+  /** Provides methods on EventStream: splitOne */
+  implicit def toSplittableOneStream[A](stream: EventStream[A]): SplittableOneStream[A] = new SplittableOneStream(stream)
+
+  /** Provides methods on EventStream: splitOption */
+  implicit def toSplittableOptionStream[A](stream: EventStream[Option[A]]): SplittableOptionStream[A] = new SplittableOptionStream(stream)
 
   /** Provides debug* methods on EventStream: debugSpy, debugLogEvents, debugBreakErrors, etc. */
-  implicit def toDebuggableStream[A](stream: EventStream[A]): DebuggableEventStream[A] = new DebuggableEventStream[A](stream)
+  implicit def toDebuggableStream[A](stream: EventStream[A]): DebuggableStream[A] = new DebuggableStream[A](stream)
 
   // toTupleStreamN conversions provide mapN and filterN methods on Signals of tuples
 
-  implicit def toTupleStream2[T1, T2](stream: EventStream[(T1, T2)]): TupleEventStream2[T1, T2] = new TupleEventStream2(stream)
+  implicit def toTupleStream2[T1, T2](stream: EventStream[(T1, T2)]): TupleStream2[T1, T2] = new TupleStream2(stream)
 
-  implicit def toTupleStream3[T1, T2, T3](stream: EventStream[(T1, T2, T3)]): TupleEventStream3[T1, T2, T3] = new TupleEventStream3(stream)
+  implicit def toTupleStream3[T1, T2, T3](stream: EventStream[(T1, T2, T3)]): TupleStream3[T1, T2, T3] = new TupleStream3(stream)
 
-  implicit def toTupleStream4[T1, T2, T3, T4](stream: EventStream[(T1, T2, T3, T4)]): TupleEventStream4[T1, T2, T3, T4] = new TupleEventStream4(stream)
+  implicit def toTupleStream4[T1, T2, T3, T4](stream: EventStream[(T1, T2, T3, T4)]): TupleStream4[T1, T2, T3, T4] = new TupleStream4(stream)
 
-  implicit def toTupleStream5[T1, T2, T3, T4, T5](stream: EventStream[(T1, T2, T3, T4, T5)]): TupleEventStream5[T1, T2, T3, T4, T5] = new TupleEventStream5(stream)
+  implicit def toTupleStream5[T1, T2, T3, T4, T5](stream: EventStream[(T1, T2, T3, T4, T5)]): TupleStream5[T1, T2, T3, T4, T5] = new TupleStream5(stream)
 
-  implicit def toTupleStream6[T1, T2, T3, T4, T5, T6](stream: EventStream[(T1, T2, T3, T4, T5, T6)]): TupleEventStream6[T1, T2, T3, T4, T5, T6] = new TupleEventStream6(stream)
+  implicit def toTupleStream6[T1, T2, T3, T4, T5, T6](stream: EventStream[(T1, T2, T3, T4, T5, T6)]): TupleStream6[T1, T2, T3, T4, T5, T6] = new TupleStream6(stream)
 
-  implicit def toTupleStream7[T1, T2, T3, T4, T5, T6, T7](stream: EventStream[(T1, T2, T3, T4, T5, T6, T7)]): TupleEventStream7[T1, T2, T3, T4, T5, T6, T7] = new TupleEventStream7(stream)
+  implicit def toTupleStream7[T1, T2, T3, T4, T5, T6, T7](stream: EventStream[(T1, T2, T3, T4, T5, T6, T7)]): TupleStream7[T1, T2, T3, T4, T5, T6, T7] = new TupleStream7(stream)
 
-  implicit def toTupleStream8[T1, T2, T3, T4, T5, T6, T7, T8](stream: EventStream[(T1, T2, T3, T4, T5, T6, T7, T8)]): TupleEventStream8[T1, T2, T3, T4, T5, T6, T7, T8] = new TupleEventStream8(stream)
+  implicit def toTupleStream8[T1, T2, T3, T4, T5, T6, T7, T8](stream: EventStream[(T1, T2, T3, T4, T5, T6, T7, T8)]): TupleStream8[T1, T2, T3, T4, T5, T6, T7, T8] = new TupleStream8(stream)
 
-  implicit def toTupleStream9[T1, T2, T3, T4, T5, T6, T7, T8, T9](stream: EventStream[(T1, T2, T3, T4, T5, T6, T7, T8, T9)]): TupleEventStream9[T1, T2, T3, T4, T5, T6, T7, T8, T9] = new TupleEventStream9(stream)
+  implicit def toTupleStream9[T1, T2, T3, T4, T5, T6, T7, T8, T9](stream: EventStream[(T1, T2, T3, T4, T5, T6, T7, T8, T9)]): TupleStream9[T1, T2, T3, T4, T5, T6, T7, T8, T9] = new TupleStream9(stream)
 }

@@ -2,11 +2,11 @@ package com.raquo.airstream.combine
 
 import com.raquo.airstream.common.InternalParentObserver
 import com.raquo.airstream.core.AirstreamError.CombinedError
-import com.raquo.airstream.core.{ SyncObservable, Transaction, WritableObservable }
+import com.raquo.airstream.core.{SyncObservable, Transaction, WritableObservable}
+import com.raquo.ew.JsArray
 import org.scalajs.dom
 
-import scala.scalajs.js
-import scala.util.{ Failure, Success, Try }
+import scala.util.{Failure, Success, Try}
 
 trait CombineObservable[A] extends SyncObservable[A] { this: WritableObservable[A] =>
 
@@ -16,7 +16,7 @@ trait CombineObservable[A] extends SyncObservable[A] { this: WritableObservable[
   protected[this] def combinedValue: Try[A]
 
   /** Parent observers are not immediately active. onStart/onStop regulates that. */
-  protected[this] val parentObservers: js.Array[InternalParentObserver[_]] = js.Array()
+  protected[this] val parentObservers: JsArray[InternalParentObserver[_]] = JsArray()
 
   // @TODO[Elegance] Not a fan of how inputsReady couples this to its subclasses
   /** Check whether inputs (parent observables' values) are all available to be combined. */
@@ -27,9 +27,9 @@ trait CombineObservable[A] extends SyncObservable[A] { this: WritableObservable[
     * evaluate maybeCombinedValue and call .fireTry()
     */
   protected[this] def onInputsReady(transaction: Transaction): Unit = {
-    if (!transaction.pendingObservables.contains(this)) {
+    if (!transaction.containsPendingObservable(this)) {
       // println(s"Marking CombineObs($id) as pending in TRX(${transaction.id})")
-      transaction.pendingObservables.enqueue(this)
+      transaction.enqueuePendingObservable(this)
     }
   }
 
@@ -45,12 +45,12 @@ trait CombineObservable[A] extends SyncObservable[A] { this: WritableObservable[
   }
 
   override protected[this] def onStart(): Unit = {
-    parentObservers.foreach(_.addToParent())
+    parentObservers.forEach(_.addToParent(shouldCallMaybeWillStart = false))
     super.onStart()
   }
 
   override protected[this] def onStop(): Unit = {
-    parentObservers.foreach(_.removeFromParent())
+    parentObservers.forEach(_.removeFromParent())
     super.onStop()
   }
 
@@ -66,20 +66,21 @@ object CombineObservable {
     }
   }
 
-  /** @param combinator MUST NOT THROW! */
-  def seqCombinator[A, B](trys: Seq[Try[A]], combinator: Seq[A] => B): Try[B] = {
-    // @TODO[Performance] typical combinator will access every value by index,
-    //  but `trys` could be a List or something with an O(N) cost for this.
-    //  However, I don't think initializing an Array in all cases will be
-    //  cheaper, because typical seq sizes are very small here (2-4)
-    if (trys.forall(_.isSuccess)) {
+  def jsArrayCombinator[A, B](trys: JsArray[Try[A]], combinator: JsArray[A] => B): Try[B] = {
+    var allSuccess: Boolean = true
+    trys.forEach { t =>
+      if (t.isFailure) {
+        allSuccess = false
+      }
+    }
+    if (allSuccess) {
       val values = trys.map(_.get)
       Success(combinator(values))
     } else {
       val errors = trys.map {
         case Failure(err) => Some(err)
         case _ => None
-      }
+      }.asScalaJs.toSeq
       Failure(CombinedError(errors))
     }
   }

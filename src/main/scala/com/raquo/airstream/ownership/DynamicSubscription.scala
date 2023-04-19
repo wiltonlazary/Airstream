@@ -1,6 +1,6 @@
 package com.raquo.airstream.ownership
 
-import com.raquo.airstream.core.{EventStream, Observable, Observer, Sink}
+import com.raquo.airstream.core.{EventStream, Observable, Observer, Sink, Transaction}
 import com.raquo.airstream.eventbus.WriteBus
 
 // @TODO[API] I could make the constructor public but it's less confusing if you use the companion object methods
@@ -14,6 +14,10 @@ import com.raquo.airstream.eventbus.WriteBus
   * and once that is done, it will remain dead forever.
   *
   * Note that the dynamic subscription is NOT activated automatically upon creation.
+  *
+  * The subscription created by `activate` must not be killed externally,
+  * otherwise DynamicSubscription will throw when it tries to kill it and
+  * it's already killed.
   *
   * @param activate - Note: Must not throw!
   * @param prepend  - If true, dynamic owner will prepend subscription to the list instead of appending.
@@ -39,7 +43,11 @@ class DynamicSubscription private (
 
   private[ownership] def onActivate(owner: Owner): Unit = {
     //println(s"    - activating $this")
-    maybeCurrentSubscription = activate(owner)
+    // I don't think Laminar itself needs onStart.shared here, this is for users' custom dynamic subscriptions.
+    // Honestly this might be overkill, but I think this is cheap, and diagnosing these kinds of bugs is expensive.
+    Transaction.onStart.shared {
+      maybeCurrentSubscription = activate(owner)
+    }
   }
 
   private[ownership] def onDeactivate(): Unit = {
@@ -55,9 +63,13 @@ object DynamicSubscription {
   /** Use this when your activate() code requires cleanup on deactivation.
     * Specify that cleanup code inside the resulting Subscription.
     *
-    * @param activate Note: Must not throw!
+    * Marked as "unsafe" because you must not kill() the subscription
+    * created by `activate`, it must be managed by this DynamicSubscription
+    * only.
+    *
+    * @param activate Note: Must not throw! Must not kill resulting subscription!
     */
-  def apply(
+  def unsafe(
     dynamicOwner: DynamicOwner,
     activate: Owner => Subscription,
     prepend: Boolean = false
@@ -93,7 +105,7 @@ object DynamicSubscription {
     observable: Observable[A],
     sink: Sink[A]
   ): DynamicSubscription = {
-    DynamicSubscription(dynamicOwner, owner => observable.addObserver(sink.toObserver)(owner))
+    DynamicSubscription.unsafe(dynamicOwner, owner => observable.addObserver(sink.toObserver)(owner))
   }
 
   def subscribeFn[A](
@@ -101,7 +113,7 @@ object DynamicSubscription {
     observable: Observable[A],
     onNext: A => Unit
   ): DynamicSubscription = {
-    DynamicSubscription(dynamicOwner, owner => observable.foreach(onNext)(owner))
+    DynamicSubscription.unsafe(dynamicOwner, owner => observable.foreach(onNext)(owner))
   }
 
   def subscribeBus[A](
@@ -109,6 +121,6 @@ object DynamicSubscription {
     eventStream: EventStream[A],
     writeBus: WriteBus[A]
   ): DynamicSubscription = {
-    DynamicSubscription(dynamicOwner, owner => writeBus.addSource(eventStream)(owner))
+    DynamicSubscription.unsafe(dynamicOwner, owner => writeBus.addSource(eventStream)(owner))
   }
 }

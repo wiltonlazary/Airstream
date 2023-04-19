@@ -8,12 +8,12 @@ trait InternalParentObserver[A] extends InternalObserver[A] {
 
   protected[this] val parent: Observable[A]
 
-  def addToParent(): Unit = {
-    parent.addInternalObserver(this)
+  def addToParent(shouldCallMaybeWillStart: Boolean): Unit = {
+    parent.addInternalObserver(this, shouldCallMaybeWillStart)
   }
 
   def removeFromParent(): Unit = {
-    Transaction.removeInternalObserver(parent, observer = this)
+    parent.removeInternalObserver(observer = this)
   }
 }
 

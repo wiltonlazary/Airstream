@@ -1,13 +1,12 @@
 package com.raquo.airstream.eventbus
 
 import com.raquo.airstream.common.InternalNextErrorObserver
-import com.raquo.airstream.core.{ EventStream, Transaction, WritableEventStream }
+import com.raquo.airstream.core.{EventStream, Protected, Transaction, WritableStream}
+import com.raquo.ew.JsArray
 
-import scala.scalajs.js
+class EventBusStream[A] private[eventbus] () extends WritableStream[A] with InternalNextErrorObserver[A] {
 
-class EventBusStream[A] private[eventbus] () extends WritableEventStream[A] with InternalNextErrorObserver[A] {
-
-  private[eventbus] val sourceStreams: js.Array[EventStream[A]] = js.Array()
+  private val sourceStreams: JsArray[EventStream[A]] = JsArray()
 
   /** Made more public to allow usage from WriteBus */
   override protected[eventbus] def isStarted: Boolean = super.isStarted
@@ -17,7 +16,7 @@ class EventBusStream[A] private[eventbus] () extends WritableEventStream[A] with
   @inline private[eventbus] def addSource(sourceStream: EventStream[A]): Unit = {
     sourceStreams.push(sourceStream)
     if (isStarted) {
-      sourceStream.addInternalObserver(this)
+      sourceStream.addInternalObserver(this, shouldCallMaybeWillStart = true)
     }
   }
 
@@ -26,7 +25,7 @@ class EventBusStream[A] private[eventbus] () extends WritableEventStream[A] with
     if (index != -1) {
       sourceStreams.splice(index, deleteCount = 1)
       if (isStarted) {
-        Transaction.removeInternalObserver(sourceStream, observer = this)
+        sourceStream.removeInternalObserver(observer = this)
       }
     }
   }
@@ -59,14 +58,18 @@ class EventBusStream[A] private[eventbus] () extends WritableEventStream[A] with
     new Transaction(fireError(nextError, _))
   }
 
+  override protected def onWillStart(): Unit = {
+    sourceStreams.forEach(Protected.maybeWillStart(_))
+  }
+
   override protected[this] def onStart(): Unit = {
-    sourceStreams.foreach(_.addInternalObserver(this))
+    sourceStreams.forEach(_.addInternalObserver(this, shouldCallMaybeWillStart = false))
     super.onStart()
   }
 
   override protected[this] def onStop(): Unit = {
     // dom.console.log("EventBusStream STOPPED!", this.toString)
-    sourceStreams.foreach(sourceStream => Transaction.removeInternalObserver(sourceStream, observer = this))
+    sourceStreams.forEach(_.removeInternalObserver(observer = this))
     super.onStop()
   }
 }

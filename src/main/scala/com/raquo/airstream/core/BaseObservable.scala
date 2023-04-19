@@ -3,9 +3,10 @@ package com.raquo.airstream.core
 import com.raquo.airstream.debug.Debugger
 import com.raquo.airstream.flatten.FlattenStrategy
 import com.raquo.airstream.ownership.{Owner, Subscription}
+import com.raquo.ew.JsArray
 
-import scala.annotation.unused
-import scala.util.Try
+import scala.scalajs.js
+import scala.util.{Failure, Success, Try}
 
 /** This trait represents a reactive value that can be subscribed to.
   *
@@ -32,7 +33,6 @@ trait BaseObservable[+Self[+_] <: Observable[_], +A] extends Source[A] with Name
   /** Note: Use Protected.topoRank(observable) to read another observable's topoRank if needed */
   protected val topoRank: Int
 
-
   /** @param project Note: guarded against exceptions */
   def map[B](project: A => B): Self[B]
 
@@ -51,11 +51,7 @@ trait BaseObservable[+Self[+_] <: Observable[_], +A] extends Source[A] with Name
     */
   def mapToStrict[B](value: B): Self[B] = map(_ => value)
 
-  // @TODO[API] Not sure if `distinct` `should accept A => Key or (A, A) => Boolean. We'll start with a more constrained version for now.
-  // @TODO[API] Implement this. We should consider making a slide() operator to support this
-
-  /** Emit a value unless its key matches the key of the last emitted value */
-  // def distinct[Key](key: A => Key): Self[A]
+  def mapToUnit: Self[Unit] = map(_ => ())
 
   /** @param compose Note: guarded against exceptions */
   @inline def flatMap[B, Inner[_], Output[+_] <: Observable[_]](compose: A => Inner[B])(
@@ -64,27 +60,55 @@ trait BaseObservable[+Self[+_] <: Observable[_], +A] extends Source[A] with Name
     strategy.flatten(map(compose))
   }
 
+  /** Distinct events (but keep all errors) by == (equals) comparison */
+  def distinct: Self[A] = distinctByFn(_ == _)
+
+  /** Distinct events (but keep all errors) by matching key
+    * Note: `key(event)` might be evaluated more than once for each event
+    */
+  def distinctBy(key: A => Any): Self[A] = distinctByFn(key(_) == key(_))
+
+  /** Distinct events (but keep all errors) by reference equality (eq) */
+  def distinctByRef(implicit ev: A <:< AnyRef): Self[A] = distinctByFn(ev(_) eq ev(_))
+
+  /** Distinct events (but keep all errors) using a comparison function */
+  def distinctByFn(isSame: (A, A) => Boolean): Self[A] = distinctTry {
+    case (Success(prev), Success(next)) => isSame(prev, next)
+    case _ => false
+  }
+
+  /** Distinct errors only (but keep all events) using a comparison function */
+  def distinctErrors(isSame: (Throwable, Throwable) => Boolean): Self[A] = distinctTry {
+    case (Failure(prevErr), Failure(nextErr)) => isSame(prevErr, nextErr)
+    case _ => false
+  }
+
+  /** Distinct all values (both events and errors) using a comparison function */
+  def distinctTry(isSame: (Try[A], Try[A]) => Boolean): Self[A]
+
   def toStreamIfSignal[B >: A](ifSignal: Signal[A] => EventStream[B]): EventStream[B] = {
-    this match {
-      case s: Signal[A @unchecked] => ifSignal(s)
-      case s: EventStream[A @unchecked] => s
-      case _ => throw new Exception("All Observables must extend EventStream or Signal")
-    }
+    matchStreamOrSignal(identity, ifSignal)
   }
 
   def toSignalIfStream[B >: A](ifStream: EventStream[A] => Signal[B]): Signal[B] = {
-    this match {
-      case s: EventStream[A @unchecked] => ifStream(s)
-      case s: Signal[A @unchecked] => s
-      case _ => throw new Exception("All Observables must extend EventStream or Signal")
-    }
+    matchStreamOrSignal(ifStream, identity)
   }
 
   /** Convert this observable to a signal of Option[A]. If it is a stream, set initial value to None. */
   def toWeakSignal: Signal[Option[A]] = {
-    map(Some(_)) match {
-      case s: EventStream[Option[A @unchecked] @unchecked] => s.toSignal(initial = None)
-      case s: Signal[Option[A @unchecked] @unchecked] => s
+    matchStreamOrSignal(
+      ifStream = _.map(Some(_)).toSignal(initial = None),
+      ifSignal = _.map(Some(_))
+    )
+  }
+
+  def matchStreamOrSignal[B](
+    ifStream: EventStream[A] => B,
+    ifSignal: Signal[A] => B
+  ): B = {
+    this match {
+      case stream: EventStream[A@unchecked] => ifStream(stream)
+      case signal: Signal[A@unchecked] => ifSignal(signal)
       case _ => throw new Exception("All Observables must extend EventStream or Signal")
     }
   }
@@ -93,10 +117,20 @@ trait BaseObservable[+Self[+_] <: Observable[_], +A] extends Source[A] with Name
   /** @param pf Note: guarded against exceptions */
   def recover[B >: A](pf: PartialFunction[Throwable, Option[B]]): Self[B]
 
-  def recoverIgnoreErrors: Self[A] = recover[A]{ case _ => None }
+  def recoverIgnoreErrors: Self[A] = recover[A] { case _ => None }
 
   /** Convert this to an observable that emits Failure(err) instead of erroring */
   def recoverToTry: Self[Try[A]]
+
+  /** Unwrap Try to "undo" `recoverToTry` – Encode Failure(err) as observable errors, and Success(v) as events */
+  def throwFailure[B](implicit ev: A <:< Try[B]): Self[B] = {
+    map { value =>
+      ev(value) match {
+        case Success(v) => v
+        case Failure(err) => throw err
+      }
+    }
+  }
 
   /** Create a new observable that listens to this one and has a debugger attached.
     *
@@ -111,7 +145,7 @@ trait BaseObservable[+Self[+_] <: Observable[_], +A] extends Source[A] with Name
   /** Create an external observer from a function and subscribe it to this observable.
     *
     * Note: since you won't have a reference to the observer, you will need to call Subscription.kill() to unsubscribe
-    * */
+    */
   def foreach(onNext: A => Unit)(implicit owner: Owner): Subscription = {
     val observer = Observer(onNext)
     addObserver(observer)(owner)
@@ -122,14 +156,58 @@ trait BaseObservable[+Self[+_] <: Observable[_], +A] extends Source[A] with Name
 
   protected[this] def addExternalObserver(observer: Observer[A], owner: Owner): Subscription
 
-  protected[this] def onAddedExternalObserver(@unused observer: Observer[A]): Unit = ()
+  protected[this] def onAddedExternalObserver(observer: Observer[A]): Unit
 
   /** Child observable should call this method on its parents when it is started.
     * This observable calls [[onStart]] if this action has given it its first observer (internal or external).
     */
-  protected[airstream] def addInternalObserver(observer: InternalObserver[A]): Unit
+  protected[airstream] def addInternalObserver(observer: InternalObserver[A], shouldCallMaybeWillStart: Boolean): Unit
 
-  /** Child observable should call Transaction.removeInternalObserver(parent, childInternalObserver) when it is stopped.
+  /** Note: do not expose this to end users. See https://github.com/raquo/Airstream/issues/10
+    *
+    * Removal still happens synchronously, just after we're done iterating over this observable's observers,
+    * to avoid interference with that logic.
+    *
+    * Note: The delay is necessary not just because of interference with actual while(index < observers.length)
+    * iteration, but also because on a high level it is too risky to remove observers from arbitrary observables
+    * while the propagation is running. This would mean that some graphs would not propagate fully, which would
+    * break very basic expectations of end users.
+    *
+    * UPDATE: In 15.0.0 we made the observable removal delay more fine grained – previously we would wait until
+    * the whole transaction completed before removing observers, now we only wait until this observable's
+    * iteration is done. This helped us fix https://github.com/raquo/Airstream/issues/95
+    *
+    * Note: To completely unsubscribe an Observer from this Observable, you need to remove it as many times
+    * as you added it to this Observable.
+    */
+  protected[airstream] def removeExternalObserver(
+    observer: Observer[A]
+  ): Unit = {
+    if (isSafeToRemoveObserver) {
+      // remove right now – useful for efficient recursive removals
+      removeExternalObserverNow(observer)
+    } else {
+      // schedule removal to happen when it's safe
+      getOrCreatePendingObserverRemovals.push(() => removeExternalObserverNow(observer))
+    }
+  }
+
+  /** Safely remove internal observer (such that it doesn't interfere with iteration over the list of observers).
+    * Removal still happens synchronously, just after we're done iterating over this observable's observers.
+    *
+    * Child observable should call this method on its parents when it is stopped.
+    */
+  protected[airstream] def removeInternalObserver(observer: InternalObserver[A]): Unit = {
+    if (isSafeToRemoveObserver) {
+      // remove right now – useful for efficient recursive removals
+      removeInternalObserverNow(observer)
+    } else {
+      // schedule removal to happen when it's safe
+      getOrCreatePendingObserverRemovals.push(() => removeInternalObserverNow(observer))
+    }
+  }
+
+  /** Child observable should call removeInternalObserver(parent, childInternalObserver) when it is stopped.
     * This observable calls [[onStop]] if this action has removed its last observer (internal or external).
     */
   protected[airstream] def removeInternalObserverNow(observer: InternalObserver[A]): Unit
@@ -140,6 +218,43 @@ trait BaseObservable[+Self[+_] <: Observable[_], +A] extends Source[A] with Name
   protected def numAllObservers: Int
 
   protected def isStarted: Boolean = numAllObservers > 0
+
+  protected var isSafeToRemoveObserver: Boolean = true
+
+  /** Observer removals scheduled to run as soon as this observable's event propagation finishes.
+    * Only put calls to `removeInternalObserverNow` and `removeExternalObserverNow` here, no custom logic.
+    */
+  protected var maybePendingObserverRemovals: js.UndefOr[JsArray[() => Unit]] = js.undefined
+
+  protected def getOrCreatePendingObserverRemovals: JsArray[() => Unit] = {
+    maybePendingObserverRemovals.getOrElse {
+      val newArray = JsArray[() => Unit]()
+      maybePendingObserverRemovals = newArray
+      newArray
+    }
+  }
+
+  /** When starting an observable, this is called recursively on every one of its parents that are not started.
+    * This whole chain happens before onStart callback is called. This chain serves to prepare the internal states
+    * of observables that are about to start, e.g. you should update the signal's value to match its parent signal's
+    * value in this callback, if applicable.
+    *
+    * Default implementation, for observables that don't need anything,
+    * should be to call `parent.maybeWillStart()` for every parent observable.
+    *
+    * If custom behaviour is required, you should generally call `parent.maybeWillStart()`
+    * BEFORE your custom logic. Then your logic will be able to make use of parent's
+    * updated value.
+    *
+    * Note: THIS METHOD MUST NOT CREATE TRANSACTIONS OR FIRE ANY EVENTS! DO IT IN ONSTART IF NEEDED.
+    */
+  protected def onWillStart(): Unit
+
+  protected def maybeWillStart(): Unit = {
+    if (!isStarted) {
+      onWillStart()
+    }
+  }
 
   /** This method is fired when this observable starts working (listening for parent events and/or firing its own events),
     * that is, when it gets its first Observer (internal or external).
@@ -155,11 +270,26 @@ trait BaseObservable[+Self[+_] <: Observable[_], +A] extends Source[A] with Name
     */
   protected def onStop(): Unit = ()
 
+  /** Airstream may internally use Scala library functions which use `==` or `hashCode` for equality, for example List.contains.
+    * Comparing observables by structural equality pretty much never makes sense, yet it's not that hard to run into that, all
+    * you need is to create a `case class` subclass, and the Scala compiler will generate a structural-equality `equals` and
+    * `hashCode` methods for you behind the scenes.
+    *
+    * To prevent that, we make equals and hashCode methods final, using the default implementation (which is reference equality).
+    */
+  final override def equals(obj: Any): Boolean = super.equals(obj)
+
+  /** Force reference equality checks. See comment for `equals`. */
+  final override def hashCode(): Int = super.hashCode()
 }
 
 object BaseObservable {
 
   @inline private[airstream] def topoRank[O[+_] <: Observable[_]](observable: BaseObservable[O, _]): Int = {
     observable.topoRank
+  }
+
+  @inline private[airstream] def maybeWillStart[O[+_] <: Observable[_]](observable: BaseObservable[O, _]): Unit = {
+    observable.maybeWillStart()
   }
 }

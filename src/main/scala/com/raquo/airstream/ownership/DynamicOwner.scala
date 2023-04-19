@@ -1,8 +1,7 @@
 package com.raquo.airstream.ownership
 
-import com.raquo.airstream.JsArray
-
-import scala.scalajs.js
+import com.raquo.airstream.core.Transaction
+import com.raquo.ew.JsArray
 
 // @Warning[Fragile]
 //  - We track a list of subscriptions and when activating / deactivating we run user code on each subscription
@@ -29,7 +28,7 @@ class DynamicOwner(onAccessAfterKilled: () => Unit) {
 
   private var isSafeToRemoveSubscription = true
 
-  private val pendingSubscriptionRemovals = js.Array[DynamicSubscription]()
+  private val pendingSubscriptionRemovals: JsArray[DynamicSubscription] = JsArray()
 
   private var _maybeCurrentOwner: Option[Owner] = None
 
@@ -51,31 +50,33 @@ class DynamicOwner(onAccessAfterKilled: () => Unit) {
 
   def activate(): Unit = {
     if (!isActive) {
-      val newOwner = new OneTimeOwner(onAccessAfterKilled)
-      // @Note If activating a subscription adds another subscription, we must make sure to call onActivate on it.
-      //  - the loop below does not do this because it fetches array length only once, at the beginning.
-      //  - it is instead done by addSubscription by virtue of _maybeCurrentOwner being already defined at this point.
-      //  - this is rather fragile, so maybe we should use a different foreach implementation.
-      _maybeCurrentOwner = Some(newOwner)
-      isSafeToRemoveSubscription = false
-      numPrependedSubs = 0
-      var i = 0;
-      val originalNumSubs = subscriptions.length // avoid double-starting subs added during the loop. See the big comment above
-      //println("    - start iteration of " + this)
-      while (i < originalNumSubs) {
-        // Prepending a sub while iterating shifts array indices, so we account for that
-        //  - Use case for this: in Laminar controlled inputs logic, we create a prepend sub
-        //    inside another dynamic subscription's activate callback
-        val ix = i + numPrependedSubs
-        val sub = subscriptions(ix)
-        //println(s"    - activating ${sub} from iteration (ix = ${ix}, i = ${i}")
-        sub.onActivate(newOwner)
-        i += 1
+      Transaction.onStart.shared {
+        val newOwner = new OneTimeOwner(onAccessAfterKilled)
+        // @Note If activating a subscription adds another subscription, we must make sure to call onActivate on it.
+        //  - the loop below does not do this because it fetches array length only once, at the beginning.
+        //  - it is instead done by addSubscription by virtue of _maybeCurrentOwner being already defined at this point.
+        //  - this is rather fragile, so maybe we should use a different foreach implementation.
+        _maybeCurrentOwner = Some(newOwner)
+        isSafeToRemoveSubscription = false
+        numPrependedSubs = 0
+        var i = 0;
+        val originalNumSubs = subscriptions.length // avoid double-starting subs added during the loop. See the big comment above
+        //println("    - start iteration of " + this)
+        while (i < originalNumSubs) {
+          // Prepending a sub while iterating shifts array indices, so we account for that
+          //  - Use case for this: in Laminar controlled inputs logic, we create a prepend sub
+          //    inside another dynamic subscription's activate callback
+          val ix = i + numPrependedSubs
+          val sub = subscriptions(ix)
+          //println(s"    - activating ${sub} from iteration (ix = ${ix}, i = ${i}")
+          sub.onActivate(newOwner)
+          i += 1
+        }
+        //println(s"    - stop iteration of $this. numPrependedSubs = $numPrependedSubs")
+        removePendingSubscriptionsNow()
+        isSafeToRemoveSubscription = true
+        numPrependedSubs = 0
       }
-      //println(s"    - stop iteration of $this. numPrependedSubs = $numPrependedSubs")
-      removePendingSubscriptionsNow()
-      isSafeToRemoveSubscription = true
-      numPrependedSubs = 0
     } else {
       throw new Exception(s"Can not activate $this: it is already active")
     }
@@ -147,6 +148,7 @@ class DynamicOwner(onAccessAfterKilled: () => Unit) {
   }
 
   private[this] def removePendingSubscriptionsNow(): Unit = {
+    // #TODO[Performance] Can we do a for-loop and then clear the whole array at once? Would that be 100% equivalent?
     while (pendingSubscriptionRemovals.length > 0) {
       val subscriptionToRemove = pendingSubscriptionRemovals.shift()
       removeSubscriptionNow(subscriptionToRemove)

@@ -20,41 +20,15 @@ developers := List(
     id = "raquo",
     name = "Nikita Gazarov",
     email = "nikita@raquo.com",
-    url = url("http://raquo.com")
+    url = url("https://github.com/raquo")
   )
 )
 
-sonatypeProfileName := "com.raquo"
-
-publishMavenStyle := true
-
 (Test / publishArtifact) := false
-
-publishTo := sonatypePublishToBundle.value
-
-releaseCrossBuild := true
 
 pomIncludeRepository := { _ => false }
 
-releaseProcess := {
-  import ReleaseTransformations._
-  Seq[ReleaseStep](
-    checkSnapshotDependencies,
-    inquireVersions,
-    runClean,
-    runTest,
-    setReleaseVersion,
-    commitReleaseVersion,
-    tagRelease,
-    releaseStepCommandAndRemaining("+publishSigned"),
-    releaseStepCommand("sonatypeBundleRelease"),
-    setNextVersion,
-    commitNextVersion,
-    pushChanges
-  )
-}
+sonatypeCredentialHost := "s01.oss.sonatype.org"
 
-//useGpg := true
-
-releasePublishArtifactsAction := PgpKeys.publishSigned.value
+sonatypeRepository := "https://s01.oss.sonatype.org/service/local"
 

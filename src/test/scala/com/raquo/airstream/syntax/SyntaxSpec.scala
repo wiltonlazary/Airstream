@@ -5,10 +5,11 @@ import com.raquo.airstream.core.{EventStream, Observable, Signal}
 import com.raquo.airstream.eventbus.EventBus
 
 import scala.concurrent.Future
+import scalajs.concurrent.JSExecutionContext.Implicits.queue
 
 class SyntaxSpec extends UnitSpec {
 
-  it("CombinableEventStream & TupleEventStream") {
+  it("CombinableStream & TupleStream") {
 
     val bus = new EventBus[Int]
     val bus1 = new EventBus[Int]
@@ -30,6 +31,21 @@ class SyntaxSpec extends UnitSpec {
     locally {
       val fooStream = bus.events.withCurrentValueOf(
         bus1.events.startWith(0),
+        bus2.events.startWith(false),
+        bus3.events.startWith("")
+      ).mapN(Foo.apply)
+      fooStream: EventStream[Foo]
+    }
+
+    // --
+
+    locally {
+      val tuple4stream = bus.events.combineWith(bus1.events).combineWith(bus2.events, bus3.events)
+      tuple4stream: EventStream[(Int, Int, Boolean, String)]
+    }
+
+    locally {
+      val fooStream = bus.events.withCurrentValueOf(bus1.events.startWith(0)).withCurrentValueOf(
         bus2.events.startWith(false),
         bus3.events.startWith("")
       ).mapN(Foo.apply)
@@ -57,18 +73,18 @@ class SyntaxSpec extends UnitSpec {
     }
   }
 
-  it("SwitchFutureStrategy") {
+  it("Replacement for ye olde SwitchFutureStrategy") {
 
     val bus = new EventBus[Int]
 
     locally {
-      val flatStream = bus.events.flatMap(a => Future.successful(a))
+      val flatStream = bus.events.flatMap(a => EventStream.fromFuture(Future.successful(a)))
       flatStream: EventStream[Int]
     }
 
     locally {
-      val flatSignal = bus.events.startWith(0).flatMap(a => Future.successful(a))
-      flatSignal: EventStream[Int]
+      val flatSignal = bus.events.startWith(0).flatMap(a => Signal.fromFuture(Future.successful(a), initial = 0))
+      flatSignal: Signal[Int]
     }
   }
 

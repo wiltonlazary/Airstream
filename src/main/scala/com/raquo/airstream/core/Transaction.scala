@@ -1,15 +1,15 @@
 package com.raquo.airstream.core
 
 import com.raquo.airstream.util.JsPriorityQueue
+import com.raquo.ew.{JsArray, JsMap}
 
 import scala.scalajs.js
 
 // @TODO[Naming] Should probably be renamed to something like "Propagation"
 /** @param code Note: Must not throw! */
-class Transaction(private[Transaction] val code: Transaction => Any) {
+class Transaction(private[Transaction] var code: Transaction => Any) {
 
-  // @TODO this is not used except for debug logging. Remove eventually
-  //val id: Int = Transaction.nextId()
+  // val id: Int = Transaction.nextId()
 
   //println(s"  - create trx $id")
 
@@ -17,36 +17,132 @@ class Transaction(private[Transaction] val code: Transaction => Any) {
     *
     * Corollary: An Observable that is dequeue-d from here does not synchronously depend on any other pending observables
     */
-  private[airstream] val pendingObservables: JsPriorityQueue[SyncObservable[_]] = {
-    new JsPriorityQueue(Protected.topoRank)
-  }
+  private[this] var maybePendingObservables: js.UndefOr[JsPriorityQueue[SyncObservable[_]]] = js.undefined
 
   Transaction.pendingTransactions.add(this)
 
   @inline private[Transaction] def resolvePendingObservables(): Unit = {
-    while (pendingObservables.nonEmpty) {
-      //dom.console.log("RANKS: ", pendingObservables.debugQueue.map(_.topoRank))
-      // Fire the first pending observable and remove it from the list
-      pendingObservables.dequeue().syncFire(this)
+    maybePendingObservables.foreach { pendingObservables =>
+      while (pendingObservables.nonEmpty) {
+        //dom.console.log("RANKS: ", pendingObservables.debugQueue.map(_.topoRank))
+        // Fire the first pending observable and remove it from the list
+        pendingObservables.dequeue().syncFire(this)
+      }
     }
   }
+
+  private[airstream] def containsPendingObservable(observable: SyncObservable[_]): Boolean = {
+    maybePendingObservables.map(_.contains(observable)).getOrElse(false)
+  }
+
+  private[airstream] def enqueuePendingObservable(observable: SyncObservable[_]): Unit = {
+    val queue = maybePendingObservables.getOrElse {
+      val newQueue = new JsPriorityQueue[SyncObservable[_]](Protected.topoRank)
+      maybePendingObservables = newQueue
+      newQueue
+    }
+    queue.enqueue(observable)
+  }
+
 }
 
-object Transaction { // extends GlobalCounter {
+object Transaction {
 
-  //private var lastId: Int = 0;
+  /** This object holds a queue of callbacks that should be executed
+    * when all observables finish starting. This lets `signal.changes`
+    * streams emit the updated signal's value when restarting, in such
+    * a way that the value propagates to all new observers instead of
+    * just the first new observer that triggered restart.
+    *
+    * For that to happen, you need to wrap the code that's adding several
+    * observers into `onStart.shared`. We do this in a couple places in
+    * Airstream, and in a couple places in Laminar, and this seems to cover
+    * most reasonable use cases. Users might need to wrap some of their code
+    * into `onStart.shared` manually if they manage subscriptions manually.
+    *
+    * See https://github.com/raquo/Airstream/#restarting-streams-that-depend-on-signals--signalchanges-
+    */
+  object onStart {
 
-  //private def nextId(): Int = {
-  //  lastId += 1
-  //  lastId
-  //}
+    private var level: Int = 0
+
+    private val pendingCallbacks: JsArray[Transaction => Unit] = JsArray()
+
+    /* Put the code that (potentially) adds more than one observer inside.
+     * If that code causes `signal.changes` to restart (and emit the signal's
+     * updated value), this event will be delayed until the rest of your code
+     * in `shared` has finished executing. You can nest `shared` calls if
+     * needed, and Airstream will wait for the outermost `shared` block to
+     * finish running before executing all pendingCallbacks. Currently this
+     * logic is only used to fire those signal.changes events.
+     *
+     * To be more specific, once the outermost `shared` block finishes executing,
+     * a new transaction will be created, and inside of it, all pending callbacks
+     * will be executed. Aside from having the benefit of executing after all
+     * the desired observers have been added, this also has the benefit of sending
+     * out all of those events in the same transaction. This is done to eliminate
+     * glitches (Airstream can avoid FRP glitches only inside a single transaction),
+     * however this can introduce other glitch-like differences in behaviour
+     * compared to the normal flow of events, e.g. observables that could otherwise
+     * never possibly emit an event in the same transaction, might do so when
+     * they're both triggered by this mechanism at the same time. However, in
+     * practice this should hopefully be almost unnoticeable, as the conditions
+     * required to trigger this mechanism are rather specific, and the expected
+     * type of glitches are less likely to be disruptive than the usual ones.
+     *
+     * If you rely on standard Laminar features for automatic management of
+     * subscriptions, you shouldn't ever need to call this manually.
+     *
+     * See https://github.com/raquo/Airstream/#restarting-streams-that-depend-on-signals--signalchanges-
+     */
+    def shared[A](code: => A): A = {
+      level += 1
+      val result = try {
+        code
+      } finally {
+        level -= 1
+        if (level == 0) {
+          resolve()
+        }
+      }
+      result
+    }
+
+    /** Add a callback to execute once the new shared transaction gets executed.
+      *
+      * @param callback - Must not throw!
+      */
+    def add(callback: Transaction => Unit): Unit = {
+      pendingCallbacks.push(callback)
+    }
+
+    private def resolve(): Unit = {
+      if (pendingCallbacks.length > 0) {
+        new Transaction(trx => {
+          // #TODO[Integrity] What if calling callback(trx) calls onStart.add?
+          //  Is it ok to put it into the same list, or should it go into a new list,
+          //  to be executed in a separate transaction?
+          while (pendingCallbacks.length > 0) {
+            val callback = pendingCallbacks.pop()
+            try {
+              callback(trx)
+            } catch {
+              case err: Throwable =>
+                // #TODO[Integrity] I'm not 100% sure that this is what we need to do here.
+                AirstreamError.sendUnhandledError(err)
+            }
+          }
+        })
+      }
+    }
+  }
 
   private object pendingTransactions {
 
     /** first transaction is the top of the stack, currently running */
-    private var stack: List[Transaction] = Nil
+    private val stack: JsArray[Transaction] = JsArray()
 
-    private val children: js.Map[Transaction, List[Transaction]] = js.Map.empty
+    private val children: JsMap[Transaction, JsArray[Transaction]] = new JsMap()
 
     def add(newTransaction: Transaction): Unit = {
       // 1. Regarding calling `run`:
@@ -58,6 +154,9 @@ object Transaction { // extends GlobalCounter {
       //    If a transaction is currently running, add newTransaction to its children.
       //    They will run after the current transaction finishes.
       peekStack().fold {
+        // #TODO[Performance] This pushToStack is taking up 15% of cpu time on a trivial eventbus --> Observer.empty benchmark.
+        //  Should we try to optimize it? Since we run the trx immediately, perhaps we could simply set a flag instead of pushing it to the array?
+        //  Consider this later when I have moer comprehensive benchmarks.
         pushToStack(newTransaction)
         run(newTransaction)
       }{ currentTransaction =>
@@ -66,6 +165,7 @@ object Transaction { // extends GlobalCounter {
     }
 
     def done(transaction: Transaction): Unit = {
+      //println(s"--done trx: ${transaction.id}")
       //if (lastId > 50) {
       //  throw new Exception(">>> Overflow!!!!!")
       //}
@@ -76,16 +176,16 @@ object Transaction { // extends GlobalCounter {
         throw new Exception("Transaction queue error: Completed transaction is not the first in stack. This is a bug in Airstream.")
       }
 
-      // Do this first on the off chance that some super custom observable creates a new transaction here,
-      // which would be crazy, but if it does happen, it would be handled correctly.
-      resolvePendingObserverRemovals()
-
       putNextTransactionOnStack(doneTransaction = transaction)
 
+      transaction.code = throwDeadTrxError  // stop holding up `trx` contents in memory
+
       peekStack().fold {
-        if (children.nonEmpty) {
+        if (children.size > 0) {
           //println(s"Stack is empty but children remain: ${children.map(t => (t._1.id, t._2.map(_.id)))}")
-          throw new Exception(s"Transaction queue error: Stack cleared, but a total of ${children.foldLeft(0)((acc, t) => acc + t._2.size)} children for ${children.size} transactions remain. This is a bug in Airstream.")
+          var numChildren = 0
+          children.forEach((transactions, _) => numChildren += transactions.length)
+          throw new Exception(s"Transaction queue error: Stack cleared, but a total of ${numChildren} children for ${children.size} transactions remain. This is a bug in Airstream.")
         }
       }{ nextTransaction =>
         run(nextTransaction)
@@ -113,133 +213,91 @@ object Transaction { // extends GlobalCounter {
       }
     }
 
-    private def childrenFor(transaction: Transaction): List[Transaction] = {
-      children.getOrElse(transaction, Nil)
+    def peekStack(): js.UndefOr[Transaction] = {
+      // in Javascript, this does not fail, but instead return `undefined` if array is empty.
+      stack(0)
+    }
+
+    def isClearState: Boolean = stack.length == 0 && children.size == 0
+
+    private def maybeChildrenFor(transaction: Transaction): js.UndefOr[JsArray[Transaction]] = {
+      children.get(transaction)
     }
 
     private def pushToStack(transaction: Transaction): Unit = {
-      //println(s"pushToStack ${transaction.id}")
-      stack = transaction :: stack
+      stack.unshift(transaction)
     }
 
-    private def popStack(): Option[Transaction] = {
-      //println(s"popStack")
-      val result = stack.headOption
-      if (result.nonEmpty) {
-        //println("- was nonEmpty")
-        stack = stack.tail
-      }
-      result
-    }
-
-    private def peekStack(): Option[Transaction] = {
-      stack.headOption
+    private def popStack(): js.UndefOr[Transaction] = {
+      // JsArray.shift returns `undefined` if array is empty
+      stack.shift()
     }
 
     private def enqueueChild(parent: Transaction, newChild: Transaction): Unit = {
       //println(s"enqueueChild parent = ${parent.id} newChild = ${newChild.id}")
-      val newChildren = childrenFor(parent) :+ newChild
-      children.update(parent, newChildren)
-    }
-
-    private def dequeueChild(parent: Transaction): Option[Transaction] = {
-      //println(s"dequeueChild parent = ${parent.id}")
-      val parentChildren = childrenFor(parent)
-      if (parentChildren.nonEmpty) {
-        //println("- found some children")
-        val nextChild = parentChildren.head
-        val updatedChildren = parentChildren.tail
-        if (updatedChildren.nonEmpty) {
-          children.update(parent, updatedChildren)
-          //println("- removed child, some remaining")
-        } else {
-          children -= parent
-          //println("- no children left for this parent, removed parent.")
-        }
-        Some(nextChild)
-      } else {
-        //println("- no children")
-        None
+      val maybeChildren = maybeChildrenFor(parent)
+      val noChildrenFound = maybeChildren.isEmpty
+      val newChildren = maybeChildren.getOrElse(JsArray())
+      newChildren.push(newChild)
+      if (noChildrenFound) {
+        children.set(parent, newChildren)
       }
     }
 
-    private[core] def isClearState: Boolean = stack.isEmpty && children.isEmpty
-  }
-
-  private var isSafeToRemoveObserver: Boolean = true
-
-  private[this] val pendingObserverRemovals: js.Array[() => Unit] = js.Array()
-
-  private[core] def isClearState: Boolean = {
-    pendingTransactions.isClearState && pendingObserverRemovals.isEmpty
-  }
-
-  /** Note: this is core-private for subscription safety. See https://github.com/raquo/Airstream/issues/10
-    *
-    * Safely remove external observer (such that it doesn't interfere with iteration over the list of observers).
-    * Removal still happens synchronously, just at the end of a transaction if one is running right now, so that it
-    * does not interfere with iteration over the observables' lists of observers during the current transaction.
-    *
-    * Note: The delay is necessary not just because of interference with actual while(index < observers.length)
-    * iteration, but also because on a high level it is too risky to remove observers from arbitrary observables
-    * while the propagation is running. This would mean that some graphs would not propagate fully, which would
-    * break very basic expectations of end users.
-    *
-    * Note: To completely unsubscribe an Observer from this Observable, you need to remove it as many times
-    * as you added it to this Observable.
-    */
-  private[core] def removeExternalObserver[A](
-    observable: Observable[A],
-    observer: Observer[A]
-  ): Unit = {
-    if (isSafeToRemoveObserver) {
-      // remove right now – useful for efficient recursive removals
-      observable.removeExternalObserverNow(observer)
-    } else {
-      // schedule removal to happen at the end of the transaction
-      // (don't want to interfere with iteration over the list of observers)
-      pendingObserverRemovals.push(() => observable.removeExternalObserverNow(observer))
+    private def dequeueChild(parent: Transaction): js.UndefOr[Transaction] = {
+      //println(s"dequeueChild parent = ${parent.id}")
+      val maybeParentChildren = maybeChildrenFor(parent)
+      maybeParentChildren.filter(_.length > 0).map { parentChildren =>
+        val nextChild = parentChildren.shift()
+        //println(s"- found some children, first: ${nextChild.id}")
+        if (parentChildren.length == 0) {
+          children.delete(parent)
+          //println("- no children left for this parent, removed parent.")
+        } else {
+          //println("- removed child, some remaining")
+        }
+        nextChild
+      }
     }
   }
 
-  /** Safely remove internal observer (such that it doesn't interfere with iteration over the list of observers).
-    * Removal still happens synchronously, just at the end of a transaction if one is running right now.
-    */
-  def removeInternalObserver[A](observable: Observable[A], observer: InternalObserver[A]): Unit = {
-    if (isSafeToRemoveObserver) {
-      // remove right now – useful for efficient recursive removals
-      observable.removeInternalObserverNow(observer)
-    } else {
-      // schedule removal to happen at the end of the transaction
-      // (don't want to interfere with iteration over observables' lists of observers)
-      pendingObserverRemovals.push(() => observable.removeInternalObserverNow(observer))
-    }
-  }
+  private[core] def isClearState: Boolean = pendingTransactions.isClearState
 
-  private def resolvePendingObserverRemovals(): Unit = {
-    if (!isSafeToRemoveObserver) {
-      throw new Exception("It's not safe to remove observers right now!")
-    }
-    pendingObserverRemovals.foreach(remove => remove())
-    pendingObserverRemovals.clear()
-  }
+  private[airstream] def currentTransaction(): js.UndefOr[Transaction] = pendingTransactions.peekStack()
 
   private def run(transaction: Transaction): Unit = {
     //println(s"--start trx ${transaction.id}")
-    isSafeToRemoveObserver = false
     try {
-      transaction.code(transaction) // @TODO[API] Shouldn't we guard against exceptions in `code` here? It can be provided by the user.
+      transaction.code(transaction)
       transaction.resolvePendingObservables()
+    } catch {
+      case err: Throwable =>
+        // #TODO[Integrity] I'm not 100% sure that this is what we want to do here,
+        //  but I think it's better than not handling the error at all.
+        AirstreamError.sendUnhandledError(err)
     } finally {
       // @TODO[API,Integrity]
       //  This block is executed regardless of whether an exception is thrown in `code` or not,
       //  but it doesn't actually catch the exception, so `new Transaction(code)` actually throws
       //  iff `code` throws AND the transaction was created while no other transaction is running
       //  This is not very predictable, so we should fix it.
-      isSafeToRemoveObserver = true
       //println(s"--end trx ${transaction.id}")
       pendingTransactions.done(transaction)
     }
   }
 
+  private val throwDeadTrxError: Transaction => Any = { trx =>
+    throw new Exception(s"Attempted to run Transaction $trx after it was already executed.")
+  }
+
+  // private var lastTransactionId: Int = 0
+  //
+  // private def nextId(): Int = {
+  //   if (lastTransactionId == Int.MaxValue) { // Note: This is lower than JS native Number.MAX_SAFE_INTEGER
+  //     lastTransactionId = 1
+  //   } else {
+  //     lastTransactionId += 1
+  //   }
+  //   lastTransactionId
+  // }
 }

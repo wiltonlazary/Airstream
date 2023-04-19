@@ -1,8 +1,8 @@
 package com.raquo.airstream.core
 
 import com.raquo.airstream.ownership.{Owner, Subscription}
+import com.raquo.ew.JsArray
 
-import scala.scalajs.js
 import scala.util.Try
 
 trait WritableObservable[A] extends Observable[A] {
@@ -46,21 +46,26 @@ trait WritableObservable[A] extends Observable[A] {
   /** Note: Observer can be added more than once to an Observable.
     * If so, it will observe each event as many times as it was added.
     */
-  protected val externalObservers: ObserverList[Observer[A]] = new ObserverList(js.Array())
+  protected val externalObservers: ObserverList[Observer[A]] = new ObserverList(JsArray())
 
   /** Note: This is enforced to be a Set outside of the type system #performance */
-  protected val internalObservers: ObserverList[InternalObserver[A]] = new ObserverList(js.Array())
+  protected val internalObservers: ObserverList[InternalObserver[A]] = new ObserverList(JsArray())
 
   override def addObserver(observer: Observer[A])(implicit owner: Owner): Subscription = {
-    val subscription = addExternalObserver(observer, owner)
-    onAddedExternalObserver(observer)
-    maybeStart()
-    subscription
+    // #nc[doc] - document this onstart.shared mechanism, both in code and in the real docs.
+    //  - also for extenders: this must be called by your observable also if it can get started without external observers downstream (basically, it shouldn't).
+    Transaction.onStart.shared {
+      maybeWillStart()
+      val subscription = addExternalObserver(observer, owner)
+      onAddedExternalObserver(observer)
+      maybeStart()
+      subscription
+    }
   }
 
   /** Subscribe an external observer to this observable */
   override protected[this] def addExternalObserver(observer: Observer[A], owner: Owner): Subscription = {
-    val subscription = new Subscription(owner, () => Transaction.removeExternalObserver(this, observer))
+    val subscription = new Subscription(owner, () => removeExternalObserver(observer))
     externalObservers.push(observer)
     //dom.console.log(s"Adding subscription: $subscription")
     subscription
@@ -69,23 +74,28 @@ trait WritableObservable[A] extends Observable[A] {
   /** Child observable should call this method on its parents when it is started.
     * This observable calls [[onStart]] if this action has given it its first observer (internal or external).
     */
-  override protected[airstream] def addInternalObserver(observer: InternalObserver[A]): Unit = {
+  override protected[airstream] def addInternalObserver(observer: InternalObserver[A], shouldCallMaybeWillStart: Boolean): Unit = {
+    //println(s"$this > aio   shouldCallMaybeWillStart=$shouldCallMaybeWillStart")
+    if (!isStarted && shouldCallMaybeWillStart) {
+      maybeWillStart()
+    }
+    //println(s"$this < aio")
     internalObservers.push(observer)
     maybeStart()
   }
 
-  /** Child observable should call Transaction.removeInternalObserver(parent, childInternalObserver) when it is stopped.
+  /** Child observable should call parent.removeInternalObserver(childInternalObserver) when it is stopped.
     * This observable calls [[onStop]] if this action has removed its last observer (internal or external).
     */
   override protected[airstream] def removeInternalObserverNow(observer: InternalObserver[A]): Unit = {
-    val removed = internalObservers.removeObserverNow(observer.asInstanceOf[InternalObserver[Any]])
+    val removed = internalObservers.removeObserverNow(observer)
     if (removed) {
       maybeStop()
     }
   }
 
   override protected[airstream] def removeExternalObserverNow(observer: Observer[A]): Unit = {
-    val removed = externalObservers.removeObserverNow(observer.asInstanceOf[Observer[Any]])
+    val removed = externalObservers.removeObserverNow(observer)
     if (removed) {
       maybeStop()
     }

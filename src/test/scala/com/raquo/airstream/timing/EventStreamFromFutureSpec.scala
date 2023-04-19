@@ -44,8 +44,8 @@ class EventStreamFromFutureSpec extends AsyncUnitSpec with BeforeAndAfter {
     stream.addObserver(obs1)
 
     delay {
-      calculations shouldEqual mutable.Buffer()
-      effects shouldEqual mutable.Buffer()
+      calculations shouldBe mutable.Buffer()
+      effects shouldBe mutable.Buffer()
 
       // --
 
@@ -53,13 +53,13 @@ class EventStreamFromFutureSpec extends AsyncUnitSpec with BeforeAndAfter {
 
       // For consistency, the stream will only emit asynchronously even if the Future is already completed
       // This is how Future.onComplete behaves.
-      calculations shouldEqual mutable.Buffer()
-      effects shouldEqual mutable.Buffer()
+      calculations shouldBe mutable.Buffer()
+      effects shouldBe mutable.Buffer()
 
     }.flatMap { _ =>
       delay {
-        calculations shouldEqual mutable.Buffer(Calculation("stream", 100))
-        effects shouldEqual mutable.Buffer(Effect("obs1", 100))
+        calculations shouldBe mutable.Buffer(Calculation("stream", 100))
+        effects shouldBe mutable.Buffer(Effect("obs1", 100))
         clearLogs()
       }
     }
@@ -69,37 +69,42 @@ class EventStreamFromFutureSpec extends AsyncUnitSpec with BeforeAndAfter {
     val promise = makePromise()
     val stream = makeStream(promise)
 
-    calculations shouldEqual mutable.Buffer()
-    effects shouldEqual mutable.Buffer()
+    calculations shouldBe mutable.Buffer()
+    effects shouldBe mutable.Buffer()
 
     promise.success(100)
     stream.addObserver(obs1)
 
     delay {
-      calculations shouldEqual mutable.Buffer(Calculation("stream", 100))
-      effects shouldEqual mutable.Buffer(Effect("obs1", 100))
+      calculations shouldBe mutable.Buffer(Calculation("stream", 100))
+      effects shouldBe mutable.Buffer(Effect("obs1", 100))
       clearLogs()
     }
   }
 
-  it("does not emit if observer added asynchronously after the future resolves") {
+  it("asynchronously emits if observer added asynchronously after the future resolves") {
     val promise = makePromise()
     val stream = makeStream(promise)
 
-    calculations shouldEqual mutable.Buffer()
-    effects shouldEqual mutable.Buffer()
+    calculations shouldBe mutable.Buffer()
+    effects shouldBe mutable.Buffer()
 
     promise.success(100)
 
     delay {
-      calculations shouldEqual mutable.Buffer()
-      effects shouldEqual mutable.Buffer()
       stream.addObserver(obs1)
+      calculations shouldBe mutable.Buffer()
+      effects shouldBe mutable.Buffer()
 
     }.flatMap { _ =>
       delay {
-        calculations shouldEqual mutable.Buffer()
-        effects shouldEqual mutable.Buffer()
+        calculations shouldBe mutable.Buffer(
+          Calculation("stream", 100)
+        )
+        effects shouldBe mutable.Buffer(
+          Effect("obs1", 100)
+        )
+        clearLogs()
       }
     }
   }
@@ -108,31 +113,31 @@ class EventStreamFromFutureSpec extends AsyncUnitSpec with BeforeAndAfter {
     val promise = makePromise()
     val stream = makeStream(promise)
 
-    calculations shouldEqual mutable.Buffer()
-    effects shouldEqual mutable.Buffer()
+    calculations shouldBe mutable.Buffer()
+    effects shouldBe mutable.Buffer()
 
     delay {
-      calculations shouldEqual mutable.Buffer()
-      effects shouldEqual mutable.Buffer()
+      calculations shouldBe mutable.Buffer()
+      effects shouldBe mutable.Buffer()
 
       stream.addObserver(obs1)
       promise.success(100)
 
-      calculations shouldEqual mutable.Buffer()
-      effects shouldEqual mutable.Buffer()
+      calculations shouldBe mutable.Buffer()
+      effects shouldBe mutable.Buffer()
 
     }.flatMap { _ =>
       delay {
-        calculations shouldEqual mutable.Buffer(Calculation("stream", 100))
-        effects shouldEqual mutable.Buffer(Effect("obs1", 100))
+        calculations shouldBe mutable.Buffer(Calculation("stream", 100))
+        effects shouldBe mutable.Buffer(Effect("obs1", 100))
         clearLogs()
 
       }.flatMap { _ =>
         stream.addObserver(obs2)
 
         delay {
-          calculations shouldEqual mutable.Buffer()
-          effects shouldEqual mutable.Buffer()
+          calculations shouldBe mutable.Buffer()
+          effects shouldBe mutable.Buffer()
         }
       }
     }

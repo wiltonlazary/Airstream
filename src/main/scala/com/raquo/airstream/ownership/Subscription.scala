@@ -1,6 +1,6 @@
 package com.raquo.airstream.ownership
 
-// @TODO[API] Change cleanup from () => Unit to : => Unit? WOuld it be possible to override such a field?
+// @TODO[API] Change cleanup from () => Unit to : => Unit? Would it be possible to override such a field?
 /** Represents a leaky resource that needs to be cleaned up.
   *
   * Subscription is linked for its life to a given owner.
@@ -15,13 +15,14 @@ class Subscription (
   cleanup: () => Unit
 ) {
 
-  // @TODO[API] Perhaps we should let subclasses read this? If anyone cares, let me know.
   /** Make sure we only kill any given Subscription once. Just a sanity check against bad user logic,
     * e.g. calling .kill() manually when `owner` has already killed this subscription.
     */
-  private[this] final var isKilled = false
+  private[this] final var _isKilled = false
 
   owner.own(this)
+
+  def isKilled: Boolean = _isKilled
 
   def kill(): Unit = {
     safeCleanup()
@@ -34,9 +35,9 @@ class Subscription (
   }
 
   private[this] def safeCleanup(): Unit = {
-    if (!isKilled) {
+    if (!_isKilled) {
       cleanup()
-      isKilled = true
+      _isKilled = true
     } else {
       throw new Exception("Can not kill Subscription: it was already killed.")
     }

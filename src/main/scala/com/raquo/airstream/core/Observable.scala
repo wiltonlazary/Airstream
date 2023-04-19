@@ -2,9 +2,7 @@ package com.raquo.airstream.core
 
 import com.raquo.airstream.debug.DebuggableObservable
 import com.raquo.airstream.flatten.FlattenStrategy
-import com.raquo.airstream.flatten.FlattenStrategy.{SwitchFutureStrategy, SwitchSignalStrategy, SwitchStreamStrategy}
-
-import scala.concurrent.Future
+import com.raquo.airstream.flatten.FlattenStrategy._
 
 // @TODO[Scala3] Put this trait together with BaseObservable in the same file, and make BaseObservable sealed.
 
@@ -14,13 +12,7 @@ import scala.concurrent.Future
   */
 trait Observable[+A] extends BaseObservable[Observable, A] {}
 
-object Observable {
-
-  implicit val switchStreamStrategy: FlattenStrategy[Observable, EventStream, EventStream] = SwitchStreamStrategy
-
-  implicit val switchSignalStrategy: FlattenStrategy[Signal, Signal, Signal] = SwitchSignalStrategy
-
-  implicit val switchFutureStrategy: FlattenStrategy[Observable, Future, EventStream] = SwitchFutureStrategy
+object Observable extends ObservableLowPriorityImplicits {
 
   /** Provides debug* methods on Observable: debugSpy, debugLogEvents, debugBreakErrors, etc. */
   implicit def toDebuggableObservable[A](observable: Observable[A]): DebuggableObservable[Observable, A] = new DebuggableObservable[Observable, A](observable)
@@ -37,6 +29,14 @@ object Observable {
     }
   }
 
-  @deprecated("0.13.0", "Use `Protected.topoRank` instead of `Observable.debugTopoRank`")
-  def debugTopoRank(observable: Observable[_]): Int = Protected.topoRank(observable)
+  implicit val switchStreamStrategy: FlattenStrategy[Observable, EventStream, EventStream] = SwitchStreamStrategy
+
+  implicit val switchSignalStreamStrategy: FlattenStrategy[EventStream, Signal, EventStream] = SwitchSignalStreamStrategy
+
+  implicit val switchSignalStrategy: FlattenStrategy[Signal, Signal, Signal] = SwitchSignalStrategy
+}
+
+trait ObservableLowPriorityImplicits {
+
+  implicit val switchSignalObservableStrategy: FlattenStrategy[Observable, Signal, Observable] = SwitchSignalObservableStrategy
 }

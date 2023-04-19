@@ -144,11 +144,11 @@ class DebugSpec extends UnitSpec with BeforeAndAfter {
 
     // --
 
-    val sub11 = events1.addObserver(obs1)
+    events1.addObserver(obs1)
 
-    val sub21 = events2.addObserver(obs21)
+    events2.addObserver(obs21)
 
-    val sub22 = events2.addObserver(obs22)
+    events2.addObserver(obs22)
 
     assert(calculations.toList == List(
       Calculation("events-1-start", Success(-1)),
@@ -205,17 +205,17 @@ class DebugSpec extends UnitSpec with BeforeAndAfter {
     // #Note: we write out `ev` excessively to make sure that type inference works
 
     val signal = v.signal
-      .debugSpyInitialEval(ev => Calculation.log("var.signal-initial", calculations)(ev))
+      .debugSpyEvalFromParent(ev => Calculation.log("var.signal-eval-from-parent", calculations)(ev))
       .debugSpy(ev => Calculation.log("var.signal", calculations)(ev))
 
     val signal1 = signal
-      .debugSpyInitialEval(ev => Calculation.log("signal-1-initial", calculations)(ev))
+      .debugSpyEvalFromParent(ev => Calculation.log("signal-1-eval-from-parent", calculations)(ev))
       .debugSpyStarts(_ => Calculation.log("signal-1-start", calculations)(Success(-1)))
       .debugSpy(ev => Calculation.log("signal-1", calculations)(ev))
       .debugSpyStops(() => Calculation.log("signal-1-stop", calculations)(Success(-1)))
 
     val signal2 = signal
-      .debugSpyInitialEval(ev => Calculation.log("signal-2-initial", calculations)(ev))
+      .debugSpyEvalFromParent(ev => Calculation.log("signal-2-eval-from-parent", calculations)(ev))
       .debugSpyEvents(ev => Calculation.log("signal-2", calculations)(Success(ev)))
       .debugSpyErrors(err => Calculation.log("signal-2", calculations)(Failure(err)))
       .debugSpyLifecycle(
@@ -245,8 +245,8 @@ class DebugSpec extends UnitSpec with BeforeAndAfter {
 
     // Order of logs is affected by order of debug statements above. It's slightly different for signal1 and signal2
     assert(calculations.toList == List(
-      Calculation("var.signal-initial", Success(1)),
-      Calculation("signal-1-initial", Success(1)),
+      Calculation("var.signal-eval-from-parent", Success(1)),
+      Calculation("signal-1-eval-from-parent", Success(1)),
       Calculation("obs-1", Success(1)),
       Calculation("var.signal", Success(1)),
       Calculation("signal-1-start", Success(-1)),
@@ -303,18 +303,18 @@ class DebugSpec extends UnitSpec with BeforeAndAfter {
 
     // --
 
-    val sub11 = signal1.addObserver(obs1)
-
-    val sub21 = signal2.addObserver(obs21)
-
-    val sub22 = signal2.addObserver(obs22)
+    val subs1 = List(
+      signal1.addObserver(obs1),
+      signal2.addObserver(obs21),
+      signal2.addObserver(obs22)
+    )
 
     assert(calculations.toList == List(
       Calculation("obs-1", Success(3)), // receive current value (initial value was already evaluated)
       Calculation("var.signal", Success(3)),
       Calculation("signal-1-start", Success(-1)),
       Calculation("signal-1", Success(3)),
-      Calculation("signal-2-initial", Success(3)),
+      Calculation("signal-2-eval-from-parent", Success(3)),
       Calculation("obs-21", Success(3)),
       Calculation("signal-2", Success(3)),
       Calculation("signal-2-start", Success(-1)),
@@ -333,6 +333,74 @@ class DebugSpec extends UnitSpec with BeforeAndAfter {
       Calculation("obs-1", Success(4)),
       Calculation("signal-2", Success(4)),
       Calculation("obs-21", Success(4)),
+      Calculation("obs-22", Success(4))
+    ))
+
+    calculations.clear()
+
+    // --
+
+    subs1.foreach(_.kill())
+
+    assert(calculations.toList == List(
+      Calculation("signal-1-stop", Success(-1)),
+      Calculation("signal-2-stop", Success(-(1))),
+    ))
+    calculations.clear()
+
+    // --
+
+    val subs2 = List(
+      signal1.addObserver(obs1),
+      signal2.addObserver(obs21),
+      signal2.addObserver(obs22)
+    )
+
+    assert(calculations.toList == List(
+      Calculation("obs-1", Success(4)),
+      Calculation("var.signal", Success(4)),
+      Calculation("signal-1-start", Success(-(1))),
+      Calculation("signal-1", Success(4)),
+      Calculation("obs-21", Success(4)),
+      Calculation("signal-2", Success(4)),
+      Calculation("signal-2-start", Success(-(1))),
+      Calculation("obs-22", Success(4))
+    ))
+
+    calculations.clear()
+
+    // --
+
+    subs2.foreach(_.kill())
+
+    assert(calculations.toList == List(
+      Calculation("signal-1-stop", Success(-1)),
+      Calculation("signal-2-stop", Success(-(1))),
+    ))
+
+    calculations.clear()
+
+    // --
+
+    v.set(4) // set some value (could even be the same!) while signals are unmounted
+
+    val subs3 = List(
+      signal1.addObserver(obs1),
+      signal2.addObserver(obs21),
+      signal2.addObserver(obs22)
+    )
+
+    assert(calculations.toList == List(
+      Calculation("var.signal-eval-from-parent", Success(4)),
+      Calculation("signal-1-eval-from-parent", Success(4)),
+      Calculation("obs-1", Success(4)),
+      Calculation("var.signal", Success(4)),
+      Calculation("signal-1-start", Success(-(1))),
+      Calculation("signal-1", Success(4)),
+      Calculation("signal-2-eval-from-parent", Success(4)),
+      Calculation("obs-21", Success(4)),
+      Calculation("signal-2", Success(4)),
+      Calculation("signal-2-start", Success(-(1))),
       Calculation("obs-22", Success(4))
     ))
 
@@ -580,11 +648,11 @@ class DebugSpec extends UnitSpec with BeforeAndAfter {
 
   it("observable debugger type inference") {
 
-    val observable: Observable[String] = EventStream.fromValue("a").debugSpy(_ => ()).debugLogStarts
+    EventStream.fromValue("a").debugSpy(_ => ()).debugLogStarts: Observable[String]
 
-    val stream: EventStream[String] = EventStream.fromValue("a").debugSpy(_ => ()).debugLogStarts
+    EventStream.fromValue("a").debugSpy(_ => ()).debugLogStarts: EventStream[String]
 
-    val signal: Signal[String] = Val("a").debugSpy(_ => ()).debugLogStarts
+    Val("a").debugSpy(_ => ()).debugLogStarts: Signal[String]
   }
 
   it("observable debugger error") {

@@ -1,3 +1,8 @@
+import VersionHelper.{versionFmt, fallbackVersion}
+
+// Lets me depend on Maven Central artifacts immediately without waiting
+resolvers ++= Resolver.sonatypeOssRepos("public")
+
 enablePlugins(ScalaJSPlugin)
 
 enablePlugins(ScalaJSBundlerPlugin)
@@ -5,8 +10,23 @@ enablePlugins(ScalaJSBundlerPlugin)
 libraryDependencies ++= Seq(
   "org.scala-js" %%% "scalajs-dom" % Versions.ScalaJsDom,
   "app.tulz" %%% "tuplez-full-light" % Versions.Tuplez,
+  "com.raquo" %%% "ew" % Versions.Ew,
   "org.scalatest" %%% "scalatest" % Versions.ScalaTest % Test
 )
+
+// Replace default sbt-dynver version with a simpler one for easier local development
+// ThisBuild / version ~= (_.replaceFirst("(\\+[a-z0-9-+]*-SNAPSHOT)", "-NEXT"))
+
+// Makes sure to increment the version for local development
+ThisBuild / version := dynverGitDescribeOutput.value
+  .mkVersion(out => versionFmt(out, dynverSonatypeSnapshots.value), fallbackVersion(dynverCurrentDate.value))
+
+ThisBuild / dynver := {
+  val d = new java.util.Date
+  sbtdynver.DynVer
+    .getGitDescribeOutput(d)
+    .mkVersion(out => versionFmt(out, dynverSonatypeSnapshots.value), fallbackVersion(d))
+}
 
 scalaVersion := Versions.Scala_2_13
 
@@ -33,15 +53,13 @@ scalacOptions += {
   }
 }
 
-// #TODO #nc re-enable deprecation warnings for 15.0.0 !!!!!!! Disabling for now to get around scala-js-dom's deprecation of dom.ext.Ajax
 (Compile / scalacOptions) ~= (_.filterNot(Set(
-  //"-deprecation",
+  "-deprecation",
   "-Xfatal-warnings"
 )))
 
 (Compile / doc / scalacOptions) ~= (_.filterNot(
   Set(
-    "-scalajs",
     "-deprecation",
     "-explain-types",
     "-explain",
@@ -62,6 +80,10 @@ scalacOptions += {
 
 (installJsdom / version) := Versions.JsDom
 
+(webpack / version) := Versions.Webpack
+
+(startWebpackDevServer / version) := Versions.WebpackDevServer
+
 useYarn := true
 
 (Test / requireJsDomEnv) := true
@@ -80,27 +102,7 @@ val generateTupleCombinatorsTo = 9
 
 Compile / sourceGenerators += Def.task {
   Seq.concat(
-    GenerateCombineEventStreams(
-      (Compile / sourceDirectory).value,
-      from = generateTupleCombinatorsFrom,
-      to = generateTupleCombinatorsTo
-    ).run,
-    GenerateCombineSignals(
-      (Compile / sourceDirectory).value,
-      from = generateTupleCombinatorsFrom,
-      to = generateTupleCombinatorsTo
-    ).run,
-    GenerateSampleCombineEventStreams(
-      (Compile / sourceDirectory).value,
-      from = generateTupleCombinatorsFrom,
-      to = generateTupleCombinatorsTo
-    ).run,
-    GenerateSampleCombineSignals(
-      (Compile / sourceDirectory).value,
-      from = generateTupleCombinatorsFrom,
-      to = generateTupleCombinatorsTo
-    ).run,
-    GenerateTupleEventStreams(
+    GenerateTupleStreams(
       (Compile / sourceDirectory).value,
       from = generateTupleCombinatorsFrom,
       to = generateTupleCombinatorsTo
@@ -110,7 +112,7 @@ Compile / sourceGenerators += Def.task {
       from = generateTupleCombinatorsFrom,
       to = generateTupleCombinatorsTo
     ).run,
-    GenerateCombinableEventStream(
+    GenerateCombinableStream(
       (Compile / sourceDirectory).value,
       from = generateTupleCombinatorsFrom,
       to = generateTupleCombinatorsTo
@@ -120,7 +122,7 @@ Compile / sourceGenerators += Def.task {
       from = generateTupleCombinatorsFrom,
       to = generateTupleCombinatorsTo
     ).run,
-    GenerateStaticEventStreamCombineOps(
+    GenerateStaticStreamCombineOps(
       (Compile / sourceDirectory).value,
       from = generateTupleCombinatorsFrom,
       to = generateTupleCombinatorsTo
@@ -140,7 +142,7 @@ Test / sourceGenerators += Def.task {
       from = generateTupleCombinatorsFrom,
       to = generateTupleCombinatorsTo
     ).run,
-    GenerateCombineEventStreamsTest(
+    GenerateCombineStreamsTest(
       (Test / sourceDirectory).value,
       from = generateTupleCombinatorsFrom,
       to = generateTupleCombinatorsTo

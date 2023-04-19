@@ -5,7 +5,7 @@ import com.raquo.airstream.core.Observable.MetaObservable
 import com.raquo.airstream.core.{EventStream, Observer}
 import com.raquo.airstream.eventbus.EventBus
 import com.raquo.airstream.fixtures.{Calculation, Effect, TestableOwner}
-import com.raquo.airstream.state.Var
+import com.raquo.airstream.state.{Val, Var}
 
 import scala.collection.mutable
 
@@ -32,18 +32,18 @@ class SwitchSignalSpec extends UnitSpec {
 
     val flattenSignal = $latestNumber.map(Calculation.log("flattened", calculations))
 
-    calculations shouldEqual mutable.Buffer()
-    effects shouldEqual mutable.Buffer()
+    calculations shouldBe mutable.Buffer()
+    effects shouldBe mutable.Buffer()
 
     // --
 
     val subFlatten = flattenSignal.addObserver(flattenObserver)
 
-    calculations shouldEqual mutable.Buffer(
+    calculations shouldBe mutable.Buffer(
       Calculation("source-0", -1),
       Calculation("flattened", -1)
     )
-    effects shouldEqual mutable.Buffer(
+    effects shouldBe mutable.Buffer(
       Effect("flattened-obs", -1)
     )
 
@@ -54,11 +54,11 @@ class SwitchSignalSpec extends UnitSpec {
 
     sourceVars(0).writer.onNext(0)
 
-    calculations shouldEqual mutable.Buffer(
+    calculations shouldBe mutable.Buffer(
       Calculation("source-0", 0),
       Calculation("flattened", 0)
     )
-    effects shouldEqual mutable.Buffer(
+    effects shouldBe mutable.Buffer(
       Effect("flattened-obs", 0)
     )
 
@@ -69,11 +69,11 @@ class SwitchSignalSpec extends UnitSpec {
 
     metaVar.writer.onNext(sourceSignals(1))
 
-    calculations shouldEqual mutable.Buffer(
+    calculations shouldBe mutable.Buffer(
       Calculation("source-1", -1),
       Calculation("flattened", -1)
     )
-    effects shouldEqual mutable.Buffer(
+    effects shouldBe mutable.Buffer(
       Effect("flattened-obs", -1)
     )
 
@@ -84,11 +84,11 @@ class SwitchSignalSpec extends UnitSpec {
 
     sourceVars(1).writer.onNext(1)
 
-    calculations shouldEqual mutable.Buffer(
+    calculations shouldBe mutable.Buffer(
       Calculation("source-1", 1),
       Calculation("flattened", 1)
     )
-    effects shouldEqual mutable.Buffer(
+    effects shouldBe mutable.Buffer(
       Effect("flattened-obs", 1)
     )
 
@@ -104,11 +104,11 @@ class SwitchSignalSpec extends UnitSpec {
     val source2Sub = sourceSignals(2).addObserver(source2Observer)
     subFlatten.kill()
 
-    calculations shouldEqual mutable.Buffer(
+    calculations shouldBe mutable.Buffer(
       Calculation("source-2", -1),
       Calculation("flattened", -1)
     )
-    effects shouldEqual mutable.Buffer(
+    effects shouldBe mutable.Buffer(
       Effect("flattened-obs", -1),
       Effect("source-2-obs", -1)
     )
@@ -118,12 +118,30 @@ class SwitchSignalSpec extends UnitSpec {
 
     // --
 
+    // flattened signal does not redo any calculations because
+    // neither the current signal nor the parent signal emitted
+    // anything while the flattened signal was stopped.
+
+    val subFlatten2 = flattenSignal.addObserver(flattenObserver)
+
+    calculations.shouldBeEmpty
+    effects shouldBe mutable.Buffer(
+      Effect("flattened-obs", -1)
+    )
+
+    effects.clear()
+
+    subFlatten2.kill()
+
+
+    // --
+
     sourceVars(2).writer.onNext(2)
 
-    calculations shouldEqual mutable.Buffer(
+    calculations shouldBe mutable.Buffer(
       Calculation("source-2", 2)
     )
-    effects shouldEqual mutable.Buffer(
+    effects shouldBe mutable.Buffer(
       Effect("source-2-obs", 2)
     )
 
@@ -132,26 +150,30 @@ class SwitchSignalSpec extends UnitSpec {
 
     // --
 
-    // flattened signal remembers its last tracked signal but wasn't keeping track of state so it emits old state
+    // flattened signal pulls current value from current signal on restart
+    // because current signal emitted while flatten signal was stopped
 
     flattenSignal.addObserver(flattenObserver) // re-activate flattened signal
 
-    calculations shouldEqual mutable.Buffer()
-    effects shouldEqual mutable.Buffer(
-      Effect("flattened-obs", -1)
+    calculations shouldBe mutable.Buffer(
+      Calculation("flattened", 2)
+    )
+    effects shouldBe mutable.Buffer(
+      Effect("flattened-obs", 2)
     )
 
+    calculations.clear()
     effects.clear()
 
     // --
 
     sourceVars(2).writer.onNext(3)
 
-    calculations shouldEqual mutable.Buffer(
+    calculations shouldBe mutable.Buffer(
       Calculation("source-2", 3),
       Calculation("flattened", 3)
     )
-    effects shouldEqual mutable.Buffer(
+    effects shouldBe mutable.Buffer(
       Effect("source-2-obs", 3),
       Effect("flattened-obs", 3)
     )
@@ -165,11 +187,11 @@ class SwitchSignalSpec extends UnitSpec {
 
     sourceVars(2).writer.onNext(4)
 
-    calculations shouldEqual mutable.Buffer(
+    calculations shouldBe mutable.Buffer(
       Calculation("source-2", 4),
       Calculation("flattened", 4)
     )
-    effects shouldEqual mutable.Buffer(
+    effects shouldBe mutable.Buffer(
       Effect("flattened-obs", 4)
     )
 
@@ -234,7 +256,7 @@ class SwitchSignalSpec extends UnitSpec {
 
     outerBus.writer.onNext(1)
 
-    assert(calculations.isEmpty) // Signal == filter eats this up
+    assert(calculations.toList == Nil)
 
     // --
 
@@ -248,9 +270,9 @@ class SwitchSignalSpec extends UnitSpec {
 
     // --
 
-    outerBus.writer.onNext(2) // Signal == filter eats this up
+    outerBus.writer.onNext(2)
 
-    assert(calculations.isEmpty)
+    assert(calculations.toList == Nil)
 
     // --
 
@@ -266,21 +288,8 @@ class SwitchSignalSpec extends UnitSpec {
 
     outerBus.writer.onNext(10) // #Note switch to big
 
-    // @TODO[API] I expected `big-0` to be emitted here first, because that was the initial state of `bigSignal`
-    //  - However, the reason why it's not emitted is kinda compelling. I'm not sure how it should behave.
-    //  - The switching logic first starts the signal that it's switching to (if it wasn't started already, like in this case)
-    //    and then it schedules a transaction to emit the signal's current value.
-    //  - But if the inner signal being started emits new events in new transactions, those transactions will be scheduled
-    //    BEFORE the transaction in the switching logic, and so those transactions will have a chance to update the
-    //    inner signal's current state before it has a chance to be observed by the switching transaction.
-    //  - I guess you could say the idea here is that the signal should be fully started before we read its current value,
-    //    but I'm not sure if I'm buying this.
-    //  - Keep in mind this is not only about observing the original initial value, but also about observing stale values
-    //    of signals that haven't been running. I think the solution to this might depend on https://github.com/raquo/Airstream/issues/43
-    //  - Maybe what needs to change is EventStream.fromSeq's timing...
-    //  - So well, it is what it is for now. We should look into this some time (this behaviour didn't change in this commit)
     assert(calculations.toList == List(
-      //Calculation("flat", "big-0"),
+      Calculation("flat", "big-0"),
       Calculation("flat", "big-1"),
       Calculation("flat", "big-2")
     ))
@@ -307,7 +316,7 @@ class SwitchSignalSpec extends UnitSpec {
 
     outerBus.writer.onNext(11)
 
-    assert(calculations.isEmpty)
+    assert(calculations.toList == Nil)
 
     // --
 
@@ -344,5 +353,62 @@ class SwitchSignalSpec extends UnitSpec {
     bigBus.writer.onNext("big bus - unrelated change")
 
     assert(calculations.isEmpty)
+  }
+
+  it("map parent inside flatMap") {
+
+    // @see https://github.com/raquo/Airstream/issues/95
+
+    val effects = mutable.Buffer[Effect[String]]()
+
+    var smallI = -1
+    var bigI = -1
+
+    val owner = new TestableOwner
+
+    val intVar = Var(2000)
+
+    val intSignal = intVar.signal
+
+    val brokenSignal =
+      intSignal
+        .flatMap { num =>
+          if (num < 1000) {
+            smallI += 1
+            intSignal.map("small: " + _).setDisplayName(s"small-$smallI") //.debugLogLifecycle()
+          } else {
+            bigI += 1
+            Val("big").setDisplayName(s"val-$bigI")
+          }
+        }
+
+    brokenSignal.foreach(Effect.log("output", effects))(owner)
+
+    def setVar(v: Int): Unit = {
+      Effect.log("set", effects)(v.toString)
+      intVar.set(v)
+    }
+
+    // --
+
+    setVar(884)
+    setVar(887)
+    setVar(1018)
+    setVar(1141)
+    setVar(1142)
+
+    effects shouldBe mutable.Buffer(
+      Effect("output", "big"),
+      Effect("set", "884"),
+      Effect("output", "small: 884"),
+      Effect("set", "887"),
+      Effect("output", "small: 887"),
+      Effect("set", "1018"),
+      Effect("output", "big"),
+      Effect("set", "1141"),
+      Effect("output", "big"),
+      Effect("set", "1142"),
+      Effect("output", "big")
+    )
   }
 }

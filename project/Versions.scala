@@ -1,18 +1,27 @@
 object Versions {
 
-  val Scala_2_12 = "2.12.13"
+  val Scala_2_12 = "2.12.17"
 
-  val Scala_2_13 = "2.13.6"
+  val Scala_2_13 = "2.13.10"
 
   val Scala_3 = "3.2.0"
 
+  // -- Dependencies --
+
   val ScalaJsDom = "2.3.0"
 
-  val Tuplez = "0.3.7"
+  val Tuplez = "0.4.0"
 
-  // Only used in test:
+  val Ew = "0.1.2"
 
-  val ScalaTest = "3.2.10"
+  // -- Test --
 
-  val JsDom = "16.4.0"
+  val ScalaTest = "3.2.14"
+
+  val JsDom = "20.0.3"
+
+  val Webpack = "5.75.0"
+
+  val WebpackDevServer = "4.11.1"
+
 }

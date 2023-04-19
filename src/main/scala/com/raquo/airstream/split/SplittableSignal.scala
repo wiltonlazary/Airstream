@@ -4,33 +4,40 @@ import com.raquo.airstream.core.Signal
 
 class SplittableSignal[M[_], Input](val signal: Signal[M[Input]]) extends AnyVal {
 
-  // Note: we can't easily have a `splitIntoStreams` on Signal
-  //  - the EventStream[Input] argument of `project` would be equivalent to `changes`, missing the initial value
-  //  - that strikes me as rather non-obvious, even though we do provide an initial value
-  //  - resolving that is actually nasty. You just can't convert a signal into a stream that emits its current value
-  //    - the crazy rules about re-emitting values when starting / stopping would be a disservice to everyone
-  @inline def split[Output, Key](
-    key: Input => Key
+  def split[Output, Key](
+    key: Input => Key,
+    distinctCompose: Signal[Input] => Signal[Input] = _.distinct,
+    duplicateKeys: DuplicateKeysConfig = DuplicateKeysConfig.default
   )(
     project: (Key, Input, Signal[Input]) => Output
-  )(implicit
-    splittable: Splittable[M]
+  )(
+    implicit splittable: Splittable[M]
   ): Signal[M[Output]] = {
-    splitIntoSignals(key)(project)
+    new SplitSignal[M, Input, Output, Key](
+      parent = signal,
+      key,
+      distinctCompose,
+      project,
+      splittable,
+      duplicateKeys
+    )
   }
 
-  def splitIntoSignals[Output, Key](
-    key: Input => Key
+  /** Like `split`, but uses index of the item in the list as the key. */
+  def splitByIndex[Output](
+    project: (Int, Input, Signal[Input]) => Output
   )(
-    project: (Key, Input, Signal[Input]) => Output
-  )(implicit
-    splittable: Splittable[M]
+    implicit splittable: Splittable[M]
   ): Signal[M[Output]] = {
-    new SplitEventStream[M, Input, Output, Key](
-      parent = signal.changes,
-      key = key,
-      project = (key, initialInput, eventStream) => project(key, initialInput, eventStream.toSignal(initialInput)),
-      splittable
-    ).toSignalWithInitialInput(lazyInitialInput = signal.tryNow())
+    new SplitSignal[M, (Input, Int), Output, Int](
+      parent = signal.map(splittable.zipWithIndex),
+      key = _._2, // Index
+      distinctCompose = _.distinctBy(_._1),
+      project = (index: Int, initialTuple, tupleSignal) => {
+        project(index, initialTuple._1, tupleSignal.map(_._1))
+      },
+      splittable,
+      DuplicateKeysConfig.noWarnings  // No need to check for duplicates – we know the keys are good.
+    )
   }
 }
